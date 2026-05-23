@@ -48,12 +48,10 @@ defmodule ExBurn.CubeclBridge do
     _device_index = Keyword.get(opts, :device_index, 0)
     _memory_limit = Keyword.get(opts, :memory_limit)
 
-    case ExBurn.Nif.gpu_available() do
-      true ->
-        {:ok, make_ref()}
-
-      false ->
-        {:error, "No GPU device available for backend: #{backend}"}
+    if ExBurn.NifHelper.gpu_available() do
+      {:ok, make_ref()}
+    else
+      {:error, "No GPU device available for backend: #{backend}"}
     end
   end
 
@@ -198,13 +196,12 @@ defmodule ExBurn.CubeclBridge do
   # ── Private Helpers ──────────────────────────────────────────────
 
   defp get_device_name do
-    case ExBurn.Nif.device_name() do
-      name when is_binary(name) -> name
-      _ -> "Unknown"
-    end
+    ExBurn.NifHelper.device_name()
   end
 
-  defp macos?, do: match?("darwin", :erlang.system_info(:system_architecture) |> elem(0))
+  defp macos?,
+    do: :erlang.system_info(:system_architecture) |> to_string() |> String.contains?("darwin")
 
-  defp linux?, do: match?("linux", :erlang.system_info(:system_architecture) |> elem(0))
+  defp linux?,
+    do: :erlang.system_info(:system_architecture) |> to_string() |> String.contains?("linux")
 end

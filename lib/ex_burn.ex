@@ -45,7 +45,7 @@ defmodule ExBurn do
   """
   @spec default_device() :: :cpu | :gpu
   def default_device do
-    if ExBurn.Nif.gpu_available(), do: :gpu, else: :cpu
+    if ExBurn.NifHelper.gpu_available(), do: :gpu, else: :cpu
   end
 
   @doc """

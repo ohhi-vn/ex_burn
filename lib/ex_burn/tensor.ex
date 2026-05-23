@@ -71,9 +71,11 @@ defmodule ExBurn.Tensor do
     shape = Nx.shape(tensor) |> Tuple.to_list()
     type = nx_type_to_burn(Nx.type(tensor))
 
-    case ExBurn.Nif.new_tensor(data, shape, Atom.to_string(type)) do
-      {:ok, ref} -> {:ok, %__MODULE__{ref: ref, shape: shape, type: type}}
-      {:error, reason} -> {:error, reason}
+    try do
+      ref = ExBurn.Nif.nif_new_tensor(data, shape, Atom.to_string(type))
+      {:ok, %__MODULE__{ref: ref, shape: shape, type: type}}
+    rescue
+      e -> {:error, Exception.message(e)}
     end
   end
 
@@ -87,17 +89,17 @@ defmodule ExBurn.Tensor do
   def to_nx(%__MODULE__{ref: ref, shape: shape, type: type}) do
     nx_type = burn_type_to_nx(type)
 
-    case ExBurn.Nif.tensor_to_binary(ref) do
-      {:ok, binary} ->
-        tensor =
-          binary
-          |> Nx.from_binary(nx_type)
-          |> Nx.reshape(List.to_tuple(shape))
+    try do
+      binary = ExBurn.Nif.nif_tensor_to_binary(ref)
 
-        {:ok, tensor}
+      tensor =
+        binary
+        |> Nx.from_binary(nx_type)
+        |> Nx.reshape(List.to_tuple(shape))
 
-      {:error, reason} ->
-        {:error, reason}
+      {:ok, tensor}
+    rescue
+      e -> {:error, Exception.message(e)}
     end
   end
 
@@ -144,9 +146,11 @@ defmodule ExBurn.Tensor do
   @spec from_binary(binary(), [non_neg_integer()], burn_type()) ::
           {:ok, t()} | {:error, String.t()}
   def from_binary(data, shape, type) do
-    case ExBurn.Nif.new_tensor(data, shape, Atom.to_string(type)) do
-      {:ok, ref} -> {:ok, %__MODULE__{ref: ref, shape: shape, type: type}}
-      {:error, reason} -> {:error, reason}
+    try do
+      ref = ExBurn.Nif.nif_new_tensor(data, shape, Atom.to_string(type))
+      {:ok, %__MODULE__{ref: ref, shape: shape, type: type}}
+    rescue
+      e -> {:error, Exception.message(e)}
     end
   end
 
@@ -176,5 +180,5 @@ defmodule ExBurn.Tensor do
 
   @doc "Frees the underlying Rust tensor."
   @spec free(t()) :: :ok
-  def free(%__MODULE__{ref: ref}), do: ExBurn.Nif.free_tensor(ref)
+  def free(%__MODULE__{ref: ref}), do: ExBurn.Nif.nif_free_tensor(ref)
 end

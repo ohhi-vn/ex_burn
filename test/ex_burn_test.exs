@@ -21,7 +21,7 @@ defmodule ExBurnTest do
 
       try do
         ExBurn.configure!()
-        assert Nx.default_backend() == ExBurn.Backend
+        assert Nx.default_backend() == {ExBurn.Backend, :ok}
       after
         Nx.default_backend(previous)
       end
@@ -120,7 +120,13 @@ defmodule ExBurnTest do
     end
 
     test "formats message with details" do
-      error = ExBurn.Error.exception(op: :matmul, reason: "shape mismatch", details: %{lhs: [3, 4], rhs: [5, 6]})
+      error =
+        ExBurn.Error.exception(
+          op: :matmul,
+          reason: "shape mismatch",
+          details: %{lhs: [3, 4], rhs: [5, 6]}
+        )
+
       msg = Exception.message(error)
       assert msg =~ "ExBurn.matmul: shape mismatch"
       assert msg =~ "[3, 4]"

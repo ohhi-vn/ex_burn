@@ -25,3 +25,4 @@ ex_burn-*.tar
 .expert
 .dexter.db*
 target
+.DS_Store

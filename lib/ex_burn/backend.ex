@@ -23,6 +23,7 @@ defmodule ExBurn.Backend do
 
   alias ExBurn.Tensor, as: BT
   alias ExBurn.Error
+  alias ExBurn.NifHelper, as: Nif
 
   @type t :: %__MODULE__{
           ref: reference(),
@@ -45,7 +46,7 @@ defmodule ExBurn.Backend do
     shape = Tuple.to_list(Nx.shape(out))
     data = <<value::float-32-native>>
 
-    case ExBurn.Nif.new_tensor(data, shape, Atom.to_string(type)) do
+    case Nif.new_tensor(data, shape, Atom.to_string(type)) do
       {:ok, ref} ->
         %__MODULE__{ref: ref, shape: shape, type: type}
 
@@ -60,7 +61,7 @@ defmodule ExBurn.Backend do
     burn_type = nx_to_burn_type(nx_type)
     shape = Tuple.to_list(Nx.shape(out))
 
-    case ExBurn.Nif.new_tensor(binary, shape, Atom.to_string(burn_type)) do
+    case Nif.new_tensor(binary, shape, Atom.to_string(burn_type)) do
       {:ok, ref} ->
         %__MODULE__{ref: ref, shape: shape, type: burn_type}
 
@@ -72,7 +73,7 @@ defmodule ExBurn.Backend do
   @impl true
   @spec to_binary(t(), non_neg_integer()) :: binary()
   def to_binary(%__MODULE__{ref: ref}, _limit) do
-    case ExBurn.Nif.tensor_to_binary(ref) do
+    case Nif.tensor_to_binary(ref) do
       {:ok, binary} ->
         binary
 
@@ -92,8 +93,8 @@ defmodule ExBurn.Backend do
     a = maybe_cast(a, :f32)
     b = maybe_cast(b, :f32)
 
-    with {:ok, ref} <- ExBurn.Nif.add_tensor(a.ref, b.ref),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.add_tensor(a.ref, b.ref),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :add, reason: reason
@@ -106,8 +107,8 @@ defmodule ExBurn.Backend do
     a = maybe_cast(a, :f32)
     b = maybe_cast(b, :f32)
 
-    with {:ok, ref} <- ExBurn.Nif.sub_tensor(a.ref, b.ref),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.sub_tensor(a.ref, b.ref),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :subtract, reason: reason
@@ -120,8 +121,8 @@ defmodule ExBurn.Backend do
     a = maybe_cast(a, :f32)
     b = maybe_cast(b, :f32)
 
-    with {:ok, ref} <- ExBurn.Nif.mul_tensor(a.ref, b.ref),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.mul_tensor(a.ref, b.ref),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :multiply, reason: reason
@@ -134,8 +135,8 @@ defmodule ExBurn.Backend do
     a = maybe_cast(a, :f32)
     b = maybe_cast(b, :f32)
 
-    with {:ok, ref} <- ExBurn.Nif.div_tensor(a.ref, b.ref),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.div_tensor(a.ref, b.ref),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :divide, reason: reason
@@ -147,8 +148,8 @@ defmodule ExBurn.Backend do
   def negate(_out, %__MODULE__{} = a) do
     a = maybe_cast(a, :f32)
 
-    with {:ok, ref} <- ExBurn.Nif.neg_tensor(a.ref),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.neg_tensor(a.ref),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :negate, reason: reason
@@ -160,8 +161,8 @@ defmodule ExBurn.Backend do
   def abs(_out, %__MODULE__{} = a) do
     a = maybe_cast(a, :f32)
 
-    with {:ok, ref} <- ExBurn.Nif.abs_tensor(a.ref),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.abs_tensor(a.ref),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :abs, reason: reason
@@ -173,8 +174,8 @@ defmodule ExBurn.Backend do
   def exp(_out, %__MODULE__{} = a) do
     a = maybe_cast(a, :f32)
 
-    with {:ok, ref} <- ExBurn.Nif.exp_tensor(a.ref),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.exp_tensor(a.ref),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :exp, reason: reason
@@ -186,8 +187,8 @@ defmodule ExBurn.Backend do
   def log(_out, %__MODULE__{} = a) do
     a = maybe_cast(a, :f32)
 
-    with {:ok, ref} <- ExBurn.Nif.log_tensor(a.ref),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.log_tensor(a.ref),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :log, reason: reason
@@ -199,8 +200,8 @@ defmodule ExBurn.Backend do
   def sqrt(_out, %__MODULE__{} = a) do
     a = maybe_cast(a, :f32)
 
-    with {:ok, ref} <- ExBurn.Nif.sqrt_tensor(a.ref),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.sqrt_tensor(a.ref),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :sqrt, reason: reason
@@ -212,8 +213,8 @@ defmodule ExBurn.Backend do
   def sigmoid(_out, %__MODULE__{} = a) do
     a = maybe_cast(a, :f32)
 
-    with {:ok, ref} <- ExBurn.Nif.sigmoid_tensor(a.ref),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.sigmoid_tensor(a.ref),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :sigmoid, reason: reason
@@ -225,8 +226,8 @@ defmodule ExBurn.Backend do
   def tanh(_out, %__MODULE__{} = a) do
     a = maybe_cast(a, :f32)
 
-    with {:ok, ref} <- ExBurn.Nif.tanh_tensor(a.ref),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.tanh_tensor(a.ref),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :tanh, reason: reason
@@ -239,8 +240,8 @@ defmodule ExBurn.Backend do
     a = maybe_cast(a, :f32)
     b = maybe_cast(b, :f32)
 
-    with {:ok, ref} <- ExBurn.Nif.pow_tensor(a.ref, b.ref),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.pow_tensor(a.ref, b.ref),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :pow, reason: reason
@@ -867,12 +868,11 @@ defmodule ExBurn.Backend do
 
   @impl true
   @spec sum(Nx.Tensor.t(), t(), keyword()) :: t()
-  def sum(_out, %__MODULE__{} = a, opts) do
+  def sum(_out, %__MODULE__{} = a, _opts) do
     a = maybe_cast(a, :f32)
-    axes = opts[:axes]
 
-    with {:ok, ref} <- ExBurn.Nif.sum_tensor(a.ref, axes || []),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.sum_tensor(a.ref),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :sum, reason: reason
@@ -891,12 +891,11 @@ defmodule ExBurn.Backend do
 
   @impl true
   @spec reduce_max(Nx.Tensor.t(), t(), keyword()) :: t()
-  def reduce_max(_out, %__MODULE__{} = a, opts) do
+  def reduce_max(_out, %__MODULE__{} = a, _opts) do
     a = maybe_cast(a, :f32)
-    axes = opts[:axes]
 
-    with {:ok, ref} <- ExBurn.Nif.max_tensor(a.ref, axes || []),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.max_tensor(a.ref),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :reduce_max, reason: reason
@@ -905,12 +904,11 @@ defmodule ExBurn.Backend do
 
   @impl true
   @spec reduce_min(Nx.Tensor.t(), t(), keyword()) :: t()
-  def reduce_min(_out, %__MODULE__{} = a, opts) do
+  def reduce_min(_out, %__MODULE__{} = a, _opts) do
     a = maybe_cast(a, :f32)
-    axes = opts[:axes]
 
-    with {:ok, ref} <- ExBurn.Nif.min_tensor(a.ref, axes || []),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.min_tensor(a.ref),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :reduce_min, reason: reason
@@ -927,8 +925,8 @@ defmodule ExBurn.Backend do
       [axis] ->
         a = maybe_cast(a, :f32)
 
-        with {:ok, ref} <- ExBurn.Nif.max_tensor(a.ref, [axis]),
-             {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+        with {:ok, ref} <- Nif.max_tensor(a.ref),
+             {:ok, shape} <- Nif.tensor_shape(ref) do
           %__MODULE__{ref: ref, shape: shape, type: :f32}
         else
           {:error, reason} -> raise Error, op: :argmax, reason: reason
@@ -955,8 +953,8 @@ defmodule ExBurn.Backend do
       [axis] ->
         a = maybe_cast(a, :f32)
 
-        with {:ok, ref} <- ExBurn.Nif.min_tensor(a.ref, [axis]),
-             {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+        with {:ok, ref} <- Nif.min_tensor(a.ref),
+             {:ok, shape} <- Nif.tensor_shape(ref) do
           %__MODULE__{ref: ref, shape: shape, type: :f32}
         else
           {:error, reason} -> raise Error, op: :argmin, reason: reason
@@ -1011,8 +1009,8 @@ defmodule ExBurn.Backend do
     a = maybe_cast(a, :f32)
     b = maybe_cast(b, :f32)
 
-    with {:ok, ref} <- ExBurn.Nif.matmul_tensor(a.ref, b.ref),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.matmul_tensor(a.ref, b.ref),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :dot, reason: reason
@@ -1023,11 +1021,9 @@ defmodule ExBurn.Backend do
   @spec transpose(Nx.Tensor.t(), t(), [non_neg_integer()]) :: t()
   def transpose(_out, %__MODULE__{} = a, axes) do
     a = maybe_cast(a, :f32)
-    dim0 = if axes == [], do: 0, else: elem(List.to_tuple(axes), 0)
-    dim1 = if axes == [], do: 1, else: elem(List.to_tuple(axes), 1)
 
-    with {:ok, ref} <- ExBurn.Nif.transpose_tensor(a.ref, dim0, dim1),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.transpose_tensor(a.ref),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :transpose, reason: reason
@@ -1042,8 +1038,8 @@ defmodule ExBurn.Backend do
     a = maybe_cast(a, :f32)
     shape_list = Tuple.to_list(Nx.shape(out))
 
-    with {:ok, ref} <- ExBurn.Nif.reshape_tensor(a.ref, shape_list),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.reshape_tensor(a.ref, shape_list),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :reshape, reason: reason
@@ -1062,8 +1058,8 @@ defmodule ExBurn.Backend do
       |> Enum.reject(fn {_dim, idx} -> idx in axes end)
       |> Enum.map(fn {dim, _idx} -> dim end)
 
-    with {:ok, ref} <- ExBurn.Nif.reshape_tensor(a.ref, new_shape),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.reshape_tensor(a.ref, new_shape),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :squeeze, reason: reason
@@ -1076,8 +1072,8 @@ defmodule ExBurn.Backend do
     a = maybe_cast(a, :f32)
     shape_list = Tuple.to_list(shape)
 
-    with {:ok, ref} <- ExBurn.Nif.broadcast_tensor(a.ref, shape_list),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.broadcast_tensor(a.ref, shape_list),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :broadcast, reason: reason
@@ -1098,8 +1094,8 @@ defmodule ExBurn.Backend do
         dim + pad_before + pad_after
       end)
 
-    with {:ok, ref} <- ExBurn.Nif.broadcast_tensor(a.ref, out_shape),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.broadcast_tensor(a.ref, out_shape),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :pad, reason: reason
@@ -1116,8 +1112,8 @@ defmodule ExBurn.Backend do
       Enum.zip([start_indices, lengths])
       |> Enum.map(fn {s, l} -> {s, s + l, 1} end)
 
-    with {:ok, ref} <- ExBurn.Nif.slice_tensor(a.ref, ranges),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.slice_tensor(a.ref, ranges),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :slice, reason: reason
@@ -1131,8 +1127,8 @@ defmodule ExBurn.Backend do
     all_f32 = Enum.map(all, &maybe_cast(&1, :f32))
     refs = Enum.map(all_f32, & &1.ref)
 
-    with {:ok, ref} <- ExBurn.Nif.concat_tensor(refs, axis),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.concat_tensor(refs, axis),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :concatenate, reason: reason
@@ -1169,8 +1165,8 @@ defmodule ExBurn.Backend do
         end
       end)
 
-    with {:ok, ref} <- ExBurn.Nif.slice_tensor(a.ref, ranges),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.slice_tensor(a.ref, ranges),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :reverse, reason: reason
@@ -1200,8 +1196,8 @@ defmodule ExBurn.Backend do
     low = opts[:low] || 0.0
     high = opts[:high] || 1.0
 
-    with {:ok, ref} <- ExBurn.Nif.random_tensor(shape, "f32", low, high),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.random_tensor(shape, "f32", low, high),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} ->
@@ -1215,8 +1211,8 @@ defmodule ExBurn.Backend do
     mean = opts[:mean] || 0.0
     std = opts[:std] || 1.0
 
-    with {:ok, ref} <- ExBurn.Nif.random_tensor(shape, "f32", mean - 2 * std, mean + 2 * std),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.random_tensor(shape, "f32", mean - 2 * std, mean + 2 * std),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} ->
@@ -1233,8 +1229,8 @@ defmodule ExBurn.Backend do
     shape = Tuple.to_list(Nx.shape(out))
     n = Enum.at(shape, 0) || 1
 
-    with {:ok, ref} <- ExBurn.Nif.eye_tensor(n, :f32),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.eye_tensor(n, :f32),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :eye, reason: reason
@@ -1248,8 +1244,8 @@ defmodule ExBurn.Backend do
     shape = Tuple.to_list(Nx.shape(out))
     axis_idx = axis || 0
 
-    with {:ok, ref} <- ExBurn.Nif.iota_tensor(shape, axis_idx, :f32),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.iota_tensor(shape, axis_idx, :f32),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :iota, reason: reason
@@ -1282,8 +1278,8 @@ defmodule ExBurn.Backend do
     stride = opts[:stride] || [1, 1]
     padding = opts[:padding] || [0, 0]
 
-    with {:ok, ref} <- ExBurn.Nif.conv2d_tensor(input.ref, kernel.ref, stride, padding),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.conv2d_tensor(input.ref, kernel.ref, stride, padding),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, reason} -> raise Error, op: :conv, reason: reason
@@ -1437,7 +1433,7 @@ defmodule ExBurn.Backend do
   @impl true
   @spec backend_deallocate(t()) :: :ok
   def backend_deallocate(%__MODULE__{ref: ref}) do
-    ExBurn.Nif.free_tensor(ref)
+    Nif.free_tensor(ref)
   end
 
   @impl true
@@ -1530,9 +1526,9 @@ defmodule ExBurn.Backend do
   defp maybe_cast(%__MODULE__{type: :f32} = t, :f32), do: t
 
   defp maybe_cast(%__MODULE__{ref: ref, shape: shape}, target_type) do
-    case ExBurn.Nif.tensor_to_binary(ref) do
+    case Nif.tensor_to_binary(ref) do
       {:ok, binary} ->
-        case ExBurn.Nif.new_tensor(binary, shape, Atom.to_string(target_type)) do
+        case Nif.new_tensor(binary, shape, Atom.to_string(target_type)) do
           {:ok, new_ref} -> %__MODULE__{ref: new_ref, shape: shape, type: target_type}
           {:error, _} -> %__MODULE__{ref: ref, shape: shape, type: target_type}
         end
@@ -1546,7 +1542,7 @@ defmodule ExBurn.Backend do
   defp to_nx(%__MODULE__{ref: ref, shape: shape, type: type}) do
     nx_type = burn_to_nx_type(type)
 
-    case ExBurn.Nif.tensor_to_binary(ref) do
+    case Nif.tensor_to_binary(ref) do
       {:ok, binary} ->
         tensor =
           binary
@@ -1566,7 +1562,7 @@ defmodule ExBurn.Backend do
     shape = Tuple.to_list(Nx.shape(tensor))
     type = nx_to_burn_type(Nx.type(tensor))
 
-    case ExBurn.Nif.new_tensor(data, shape, Atom.to_string(type)) do
+    case Nif.new_tensor(data, shape, Atom.to_string(type)) do
       {:ok, ref} -> {:ok, %__MODULE__{ref: ref, shape: shape, type: type}}
       {:error, reason} -> {:error, reason}
     end
@@ -1577,7 +1573,7 @@ defmodule ExBurn.Backend do
     data = <<val::float-32-native>>
     shape = Tuple.to_list(Nx.shape(out))
 
-    case ExBurn.Nif.new_tensor(data, shape, "f32") do
+    case Nif.new_tensor(data, shape, "f32") do
       {:ok, ref} -> %__MODULE__{ref: ref, shape: shape, type: :f32}
       {:error, _} -> template
     end
@@ -1592,8 +1588,8 @@ defmodule ExBurn.Backend do
   @spec apply_reduce_fun(t()) :: t()
   defp apply_reduce_fun(%__MODULE__{} = tensor) do
     # Default reduction: sum over all axes
-    with {:ok, ref} <- ExBurn.Nif.sum_tensor(tensor.ref, []),
-         {:ok, shape} <- ExBurn.Nif.tensor_shape(ref) do
+    with {:ok, ref} <- Nif.sum_tensor(tensor.ref),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
       {:error, _} -> tensor
