@@ -191,20 +191,35 @@ defmodule ExBurn.Training do
 
   # ── Learning Rate Scheduling ─────────────────────────────────────
 
-  defp apply_lr_schedule(%Model{optimizer_state: opt_state} = model, nil, _epoch, _total), do: model
+  defp apply_lr_schedule(%Model{} = model, nil, _epoch, _total), do: model
 
-  defp apply_lr_schedule(%Model{optimizer_state: opt_state} = model, {:step, base_lr, step_size, gamma}, epoch, _total) do
+  defp apply_lr_schedule(
+         %Model{optimizer_state: opt_state} = model,
+         {:step, base_lr, step_size, gamma},
+         epoch,
+         _total
+       ) do
     exponent = div(epoch - 1, step_size)
     new_lr = base_lr * :math.pow(gamma, exponent)
     %{model | optimizer_state: Map.put(opt_state, :learning_rate, new_lr)}
   end
 
-  defp apply_lr_schedule(%Model{optimizer_state: opt_state} = model, {:exponential, base_lr, gamma}, epoch, _total) do
+  defp apply_lr_schedule(
+         %Model{optimizer_state: opt_state} = model,
+         {:exponential, base_lr, gamma},
+         epoch,
+         _total
+       ) do
     new_lr = base_lr * :math.pow(gamma, epoch - 1)
     %{model | optimizer_state: Map.put(opt_state, :learning_rate, new_lr)}
   end
 
-  defp apply_lr_schedule(%Model{optimizer_state: opt_state} = model, {:cosine, base_lr, min_lr}, epoch, total) do
+  defp apply_lr_schedule(
+         %Model{optimizer_state: opt_state} = model,
+         {:cosine, base_lr, min_lr},
+         epoch,
+         total
+       ) do
     progress = (epoch - 1) / max(total - 1, 1)
     new_lr = min_lr + 0.5 * (base_lr - min_lr) * (1.0 + :math.cos(:math.pi() * progress))
     %{model | optimizer_state: Map.put(opt_state, :learning_rate, new_lr)}
@@ -217,37 +232,36 @@ defmodule ExBurn.Training do
     indices = Enum.to_list(0..(num_samples - 1))
 
     {total_loss, model} =
-      Enum.reduce(Enum.chunk_every(indices, batch_size, batch_size, []), {0.0, model}, fn batch_indices,
-                                                                                         {loss_acc, model} ->
-        actual_bs = length(batch_indices)
-        num_features = elem(Nx.shape(inputs), 1)
-        num_targets = elem(Nx.shape(targets), 1)
+      Enum.reduce(
+        Enum.chunk_every(indices, batch_size, batch_size, []),
+        {0.0, model},
+        fn batch_indices, {loss_acc, model} ->
+          # Gather batch using Nx.take for proper indexing
+          batch_in = gather_rows(inputs, batch_indices)
+          batch_tgt = gather_rows(targets, batch_indices)
 
-        # Gather batch using Nx.take for proper indexing
-        batch_in = gather_rows(inputs, batch_indices)
-        batch_tgt = gather_rows(targets, batch_indices)
+          # Forward pass
+          {:ok, pred} = Model.predict(model, batch_in)
 
-        # Forward pass
-        {:ok, pred} = Model.predict(model, batch_in)
+          # Compute loss
+          {:ok, loss} = Model.compute_loss(model, pred, batch_tgt)
+          loss_val = Nx.to_number(loss)
 
-        # Compute loss
-        {:ok, loss} = Model.compute_loss(model, pred, batch_tgt)
-        loss_val = Nx.to_number(loss)
+          # Backward pass: compute gradients via numerical differentiation
+          grads = compute_gradients(model, batch_in, batch_tgt)
 
-        # Backward pass: compute gradients via numerical differentiation
-        grads = compute_gradients(model, batch_in, batch_tgt)
+          # Clip gradients
+          grads =
+            grads
+            |> maybe_clip_by_norm(clip_norm)
+            |> maybe_clip_by_value(clip_value)
 
-        # Clip gradients
-        grads =
-          grads
-          |> maybe_clip_by_norm(clip_norm)
-          |> maybe_clip_by_value(clip_value)
+          # Optimizer step: update parameters
+          model = optimizer_step(model, grads)
 
-        # Optimizer step: update parameters
-        model = optimizer_step(model, grads)
-
-        {loss_acc + loss_val, model}
-      end)
+          {loss_acc + loss_val, model}
+        end
+      )
 
     {total_loss / max(num_batches, 1), model}
   end
@@ -273,33 +287,49 @@ defmodule ExBurn.Training do
     shape = Nx.shape(param_value)
     flat = Nx.flatten(param_value)
     n = Nx.size(flat)
+    flat_binary = Nx.to_binary(flat)
 
-    grad_flat =
-      Nx.from_binary(
-        Enum.map(0..(n - 1), fn i ->
-          # f(x + eps)
-          plus = Nx.put(flat, i, Nx.add(Nx.take(flat, i), epsilon))
-          plus_param = Nx.reshape(plus, shape)
-          model_plus = put_in_model_param(model, param_key, plus_param)
-          {:ok, loss_plus} = Model.predict(model_plus, input)
-          {:ok, loss_plus} = Model.compute_loss(model_plus, loss_plus, target)
-          lp = Nx.to_number(loss_plus)
+    grad_data =
+      Enum.map(0..(n - 1), fn i ->
+        # Get current value at index i
+        <<_before::binary-size(i * 4), current_val::float-32-little, _after::binary>> =
+          flat_binary
 
-          # f(x - eps)
-          minus = Nx.put(flat, i, Nx.subtract(Nx.take(flat, i), epsilon))
-          minus_param = Nx.reshape(minus, shape)
-          model_minus = put_in_model_param(model, param_key, minus_param)
-          {:ok, loss_minus} = Model.predict(model_minus, input)
-          {:ok, loss_minus} = Model.compute_loss(model_minus, loss_minus, target)
-          lm = Nx.to_number(loss_minus)
+        # f(x + eps)
+        plus_binary =
+          binary_replace(flat_binary, i * 4, <<current_val + epsilon::float-32-little>>)
 
-          (lp - lm) / (2.0 * epsilon)
-        end)
-        |> :erlang.list_to_binary(),
-        :f32
-      )
+        plus = Nx.from_binary(plus_binary, :f32)
+        plus_param = Nx.reshape(plus, shape)
+        model_plus = put_in_model_param(model, param_key, plus_param)
+        {:ok, loss_plus} = Model.predict(model_plus, input)
+        {:ok, loss_plus} = Model.compute_loss(model_plus, loss_plus, target)
+        lp = Nx.to_number(loss_plus)
 
+        # f(x - eps)
+        minus_binary =
+          binary_replace(flat_binary, i * 4, <<current_val - epsilon::float-32-little>>)
+
+        minus = Nx.from_binary(minus_binary, :f32)
+        minus_param = Nx.reshape(minus, shape)
+        model_minus = put_in_model_param(model, param_key, minus_param)
+        {:ok, loss_minus} = Model.predict(model_minus, input)
+        {:ok, loss_minus} = Model.compute_loss(model_minus, loss_minus, target)
+        lm = Nx.to_number(loss_minus)
+
+        (lp - lm) / (2.0 * epsilon)
+      end)
+
+    grad_binary =
+      Enum.map(grad_data, fn val -> <<val::float-32-little>> end) |> :erlang.list_to_binary()
+
+    grad_flat = Nx.from_binary(grad_binary, :f32)
     Nx.reshape(grad_flat, shape)
+  end
+
+  defp binary_replace(binary, offset, replacement) do
+    <<before::binary-size(offset), _::binary-size(byte_size(replacement)), rest::binary>> = binary
+    before <> replacement <> rest
   end
 
   defp put_in_model_param(%Model{} = model, key, value) do
@@ -337,7 +367,10 @@ defmodule ExBurn.Training do
 
   # ── Optimizer Steps ──────────────────────────────────────────────
 
-  defp optimizer_step(%Model{optimizer: :adam, optimizer_state: state, params: params} = model, grads) do
+  defp optimizer_step(
+         %Model{optimizer: :adam, optimizer_state: state, params: params} = model,
+         grads
+       ) do
     t = state.t + 1
     lr = state.learning_rate
     beta1 = state.beta1
@@ -353,7 +386,11 @@ defmodule ExBurn.Training do
         m_t = Nx.add(Nx.multiply(beta1, Map.get(m_acc, key)), Nx.multiply(1.0 - beta1, grad))
 
         # v_t = beta2 * v_{t-1} + (1 - beta2) * g_t^2
-        v_t = Nx.add(Nx.multiply(beta2, Map.get(v_acc, key)), Nx.multiply(1.0 - beta2, Nx.multiply(grad, grad)))
+        v_t =
+          Nx.add(
+            Nx.multiply(beta2, Map.get(v_acc, key)),
+            Nx.multiply(1.0 - beta2, Nx.multiply(grad, grad))
+          )
 
         # Bias correction
         m_hat = Nx.divide(m_t, 1.0 - :math.pow(beta1, t))
@@ -370,7 +407,10 @@ defmodule ExBurn.Training do
     %{model | params: new_params, optimizer_state: new_state}
   end
 
-  defp optimizer_step(%Model{optimizer: :sgd, optimizer_state: state, params: params} = model, grads) do
+  defp optimizer_step(
+         %Model{optimizer: :sgd, optimizer_state: state, params: params} = model,
+         grads
+       ) do
     lr = state.learning_rate
     momentum = state.momentum
 
@@ -391,7 +431,10 @@ defmodule ExBurn.Training do
     %{model | params: new_params, optimizer_state: new_state}
   end
 
-  defp optimizer_step(%Model{optimizer: :rmsprop, optimizer_state: state, params: params} = model, grads) do
+  defp optimizer_step(
+         %Model{optimizer: :rmsprop, optimizer_state: state, params: params} = model,
+         grads
+       ) do
     lr = state.learning_rate
     decay = state.decay
     epsilon = state.epsilon
@@ -401,10 +444,11 @@ defmodule ExBurn.Training do
         grad = Map.get(grads, key, Nx.broadcast(Nx.tensor(0.0), Nx.shape(param)))
 
         # cache_t = decay * cache_{t-1} + (1 - decay) * g_t^2
-        cache_t = Nx.add(
-          Nx.multiply(decay, Map.get(cache_acc, key)),
-          Nx.multiply(1.0 - decay, Nx.multiply(grad, grad))
-        )
+        cache_t =
+          Nx.add(
+            Nx.multiply(decay, Map.get(cache_acc, key)),
+            Nx.multiply(1.0 - decay, Nx.multiply(grad, grad))
+          )
 
         # param_t = param_{t-1} - lr * grad / (sqrt(cache_t) + epsilon)
         update = Nx.divide(grad, Nx.add(Nx.sqrt(cache_t), epsilon))
@@ -429,11 +473,11 @@ defmodule ExBurn.Training do
 
   # ── Progress Printing ────────────────────────────────────────────
 
-  defp print_progress(%{epoch: epoch, loss: loss}) do
+  defp print_progress(%{epoch: epoch, loss: loss, val_loss: nil}) do
     IO.puts("Epoch #{epoch}: loss=#{:erlang.float_to_binary(loss, decimals: 4)}")
   end
 
-  defp print_progress(%{epoch: epoch, loss: loss, val_loss: val_loss}) do
+  defp print_progress(%{epoch: epoch, loss: loss, val_loss: val_loss}) when is_number(val_loss) do
     IO.puts(
       "Epoch #{epoch}: loss=#{:erlang.float_to_binary(loss, decimals: 4)} val_loss=#{:erlang.float_to_binary(val_loss, decimals: 4)}"
     )
@@ -487,7 +531,7 @@ defmodule ExBurn.Training do
               Agent.update(pid, fn s -> %{s | wait: new_wait} end)
               metrics
             end
-        end
+          end
 
         metrics ->
           metrics

@@ -11,21 +11,21 @@ name = "ex_burn_nif"
 crate-type = ["cdylib"]
 
 [dependencies]
-rustler = "0.37"
+rustler = "=0.37.3"
 
 # Burn deep learning framework with CubeCL backend
-burn = { version = "0.21", features = ["cubecl"] }
-burn-cubecl = "0.21"
-burn-autodiff = "0.21"
-burn-tensor = "0.21"
-burn-ndarray = "0.21"
+burn = { version = "=0.21.0", features = ["cubecl"] }
+burn-cubecl = "=0.21.0"
+burn-autodiff = "=0.21.0"
+burn-tensor = "=0.21.0"
+burn-ndarray = "=0.21.0"
 
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# Serialization — use minimum versions compatible with Burn 0.21
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.148"
 
 # Error handling
-thiserror = "1.0"
+thiserror = "1.0.64"
 
 # Logging
 log = "0.4"

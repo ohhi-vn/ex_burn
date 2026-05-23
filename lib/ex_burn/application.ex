@@ -10,8 +10,8 @@ defmodule ExBurn.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      # NIF loader — loads the Rust shared library at runtime
-      ExBurn.Nif
+      # No NIF child needed — Rustler loads the NIF automatically
+      # when ExBurn.Nif functions are first called
     ]
 
     opts = [strategy: :one_for_one, name: ExBurn.Supervisor]

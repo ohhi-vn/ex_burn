@@ -45,8 +45,8 @@ defmodule ExBurn.CubeclBridge do
   """
   @spec init(backend(), keyword()) :: {:ok, context()} | {:error, String.t()}
   def init(backend, opts \\ []) do
-    device_index = Keyword.get(opts, :device_index, 0)
-    memory_limit = Keyword.get(opts, :memory_limit)
+    _device_index = Keyword.get(opts, :device_index, 0)
+    _memory_limit = Keyword.get(opts, :memory_limit)
 
     case ExBurn.Nif.gpu_available() do
       true ->
@@ -79,7 +79,7 @@ defmodule ExBurn.CubeclBridge do
   """
   @spec compile_kernel(context(), kernel(), keyword()) ::
           {:ok, reference()} | {:error, String.t()}
-  def compile_kernel(_ctx, kernel_type, _opts \\ []) do
+  def compile_kernel(_ctx, _kernel_type, _opts \\ []) do
     # In a real implementation, this would compile a CubeCL kernel
     # For now, we return a reference to a cached kernel
     {:ok, make_ref()}
@@ -102,7 +102,7 @@ defmodule ExBurn.CubeclBridge do
   @spec execute(context(), kernel(), [BurnBridge.t()], keyword()) ::
           {:ok, BurnBridge.t()} | {:error, String.t()}
   def execute(_ctx, kernel_type, args, opts \\ []) do
-    workgroup_size = Keyword.get(opts, :workgroup_size, 256)
+    _workgroup_size = Keyword.get(opts, :workgroup_size, 256)
 
     case kernel_type do
       :matmul ->

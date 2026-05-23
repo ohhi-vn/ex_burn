@@ -71,7 +71,7 @@ defmodule ExBurn.Tensor do
     shape = Nx.shape(tensor) |> Tuple.to_list()
     type = nx_type_to_burn(Nx.type(tensor))
 
-    case ExBurn.Nif.new_tensor(data, shape, type) do
+    case ExBurn.Nif.new_tensor(data, shape, Atom.to_string(type)) do
       {:ok, ref} -> {:ok, %__MODULE__{ref: ref, shape: shape, type: type}}
       {:error, reason} -> {:error, reason}
     end
@@ -144,7 +144,7 @@ defmodule ExBurn.Tensor do
   @spec from_binary(binary(), [non_neg_integer()], burn_type()) ::
           {:ok, t()} | {:error, String.t()}
   def from_binary(data, shape, type) do
-    case ExBurn.Nif.new_tensor(data, shape, type) do
+    case ExBurn.Nif.new_tensor(data, shape, Atom.to_string(type)) do
       {:ok, ref} -> {:ok, %__MODULE__{ref: ref, shape: shape, type: type}}
       {:error, reason} -> {:error, reason}
     end

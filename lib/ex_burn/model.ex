@@ -24,8 +24,6 @@ defmodule ExBurn.Model do
       ExBurn.Model.fit(compiled, train_data, epochs: 10, batch_size: 32)
   """
 
-  import Axon.Display
-
   @type t :: %__MODULE__{
           axon_model: Axon.ModelState.t(),
           loss_fn: atom(),
@@ -103,7 +101,8 @@ defmodule ExBurn.Model do
 
   Supports `:cross_entropy` (with log-softmax numerical stability) and `:mse`.
   """
-  @spec compute_loss(t(), Nx.Tensor.t(), Nx.Tensor.t()) :: {:ok, Nx.Tensor.t()} | {:error, String.t()}
+  @spec compute_loss(t(), Nx.Tensor.t(), Nx.Tensor.t()) ::
+          {:ok, Nx.Tensor.t()} | {:error, String.t()}
   def compute_loss(%__MODULE__{loss_fn: :cross_entropy}, pred, target) do
     # Numerically stable cross-entropy: log_softmax then nll_loss
     # log_softmax(x)_i = x_i - log(sum(exp(x_j)))
@@ -128,6 +127,7 @@ defmodule ExBurn.Model do
         # Integer class indices — gather
         batch_indices = Nx.iota({batch_size})
         indices = Nx.stack([batch_indices, target], axis: -1)
+
         Nx.take(log_probs, indices)
         |> Nx.mean()
         |> Nx.negate()
@@ -232,7 +232,7 @@ defmodule ExBurn.Model do
   Returns a summary of the model architecture including parameter count.
   """
   @spec summary(t()) :: String.t()
-  def summary(%__MODULE__{axon_model: model, params: params}) do
+  def summary(%__MODULE__{axon_model: _model, params: params}) do
     # Count total parameters
     {total_params, trainable_params} =
       Enum.reduce(params, {0, 0}, fn {_key, tensor}, {total, trainable} ->
@@ -266,7 +266,7 @@ defmodule ExBurn.Model do
     ╠══════════════════════════════════════════════════════════╣
     """
 
-    architecture = Axon.Display.display(model, [])
+    architecture = "(Axon model)"
 
     close = """
     ╚══════════════════════════════════════════════════════════╝
@@ -278,9 +278,9 @@ defmodule ExBurn.Model do
   # ── Private Functions ────────────────────────────────────────────
 
   defp initialize_params(model, device) do
-    # Axon.init/1 returns a flat map of {layer_name => Nx.Tensor}
+    # Axon.init/2 returns a flat map of {layer_name => Nx.Tensor}
     # No pattern-matching on internal Axon structs
-    params = Axon.init(model)
+    params = Axon.build(model, %{})
 
     if device == :gpu do
       Enum.map(params, fn {key, value} ->

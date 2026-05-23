@@ -20,6 +20,29 @@ CubeCL kernels
 Metal (iOS) / Vulkan (Android) / CUDA → GPU
 ```
 
+## Status
+
+**Version 0.1.0 — Early Alpha**
+
+| Feature | Status |
+|---------|--------|
+| Nx.Backend behaviour (basic ops) | ✅ Implemented |
+| Nx.Backend behaviour (shape ops) | ✅ Implemented |
+| Nx.Backend behaviour (reductions) | ✅ Implemented |
+| Nx.Backend behaviour (linear algebra) | ✅ Implemented |
+| Rust NIF bridge (Burn CubeCL) | ✅ Implemented |
+| GPU acceleration (Metal/Vulkan) | ✅ Via Burn/CubeCL |
+| Axon model compilation | 🔄 Basic support |
+| Training loop (SGD/Adam/RMSprop) | 🔄 Basic support |
+| Mobile deployment (Dala) | 🚧 Planned |
+| Nx.Defn.Compiler | 🚧 Planned |
+| CUDA backend | 🚧 Planned |
+| Precompiled NIF binaries | 🚧 Planned |
+
+> ⚠️ **Note**: The Quick Start examples show the target API. Some features
+> (training loop, mobile deployment) are partially implemented and may not
+> work end-to-end yet. See the [guides](guides/) for what's currently working.
+
 ## Features
 
 - **Nx Backend**: Full `Nx.Backend` behaviour implementation — drop-in replacement for `Nx.BinaryBackend`
@@ -31,6 +54,9 @@ Metal (iOS) / Vulkan (Android) / CUDA → GPU
 - **Structured Errors**: `ExBurn.Error` exception type with operation context
 
 ## Quick Start
+
+> **Note**: This section shows the target API. Some features may not work
+> end-to-end yet — see the [Status](#status) section above.
 
 ```elixir
 # Set ExBurn as the default Nx backend
@@ -64,6 +90,9 @@ ExBurn.Training.fit(compiled, {train_x, train_y},
 ```
 
 ## Mobile Deployment (Dala)
+
+> **Note**: `ExBurn.DalaML` is tightly coupled to the Dala framework and is
+> currently aspirational. The core Nx backend works independently.
 
 ```elixir
 # Compile for iOS (Metal GPU)

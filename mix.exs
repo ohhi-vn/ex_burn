@@ -32,11 +32,11 @@ defmodule ExBurn.MixProject do
       # Nx tensor computation
       {:nx, "~> 0.7"},
       # Rust NIF integration
-      {:rustler, "~> 0.37", runtime: false},
+      {:rustler, "~> 0.37.0", runtime: false},
       # Neural network library
-      {:axon, "~> 0.7"},
+      {:axon, "~> 0.7", optional: true},
       # Classical ML algorithms
-      {:scholar, "~> 0.4"},
+      {:scholar, "~> 0.4", optional: true},
       # Documentation
       {:ex_doc, "~> 0.40", only: :dev, runtime: false}
     ]
@@ -54,15 +54,23 @@ defmodule ExBurn.MixProject do
   defp package do
     [
       licenses: ["Apache-2.0"],
-      links: %{"GitHub" => @github_url},
+      links: %{
+        "GitHub" => @github_url,
+        "Changelog" => "#{@github_url}/blob/main/CHANGELOG.md"
+      },
       files: ~w(
         lib
         native/ex_burn_nif/Cargo.toml
+        native/ex_burn_nif/Cargo.lock
         native/ex_burn_nif/src
         mix.exs
+        mix.lock
+        README.md
+        CHANGELOG.md
         README.md
         LICENSE
-      )
+      ),
+      maintainers: ["Manh Vu"]
     ]
   end
 

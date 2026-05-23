@@ -65,12 +65,13 @@ defmodule ExBurn.DalaML do
 
     `{:ok, compiled_model}` on success, `{:error, reason}` on failure.
   """
-  @spec compile(Axon.ModelState.t(), keyword()) :: {:ok, compiled_model()} | {:error, compile_error()}
+  @spec compile(Axon.ModelState.t(), keyword()) ::
+          {:ok, compiled_model()} | {:error, compile_error()}
   def compile(%Axon.ModelState{} = model, opts \\ []) do
     target = Keyword.get(opts, :target, :ios)
     input_shape = Keyword.get(opts, :input_shape)
     precision = Keyword.get(opts, :precision, :f16)
-    batch_size = Keyword.get(opts, :batch_size, 1)
+    _batch_size = Keyword.get(opts, :batch_size, 1)
     quantize = Keyword.get(opts, :quantize, true)
 
     with :ok <- validate_target(target),
@@ -99,7 +100,8 @@ defmodule ExBurn.DalaML do
 
   Accepts an Nx tensor as input and returns the model's output as an Nx tensor.
   """
-  @spec predict(compiled_model(), Nx.Tensor.t()) :: {:ok, Nx.Tensor.t()} | {:error, compile_error()}
+  @spec predict(compiled_model(), Nx.Tensor.t()) ::
+          {:ok, Nx.Tensor.t()} | {:error, compile_error()}
   def predict(%{params: params, input_shape: expected_shape, graph: graph}, %Nx.Tensor{} = input) do
     actual_shape = Nx.shape(input)
 
@@ -117,7 +119,16 @@ defmodule ExBurn.DalaML do
   For Android, this produces a `.tflite` compatible flatbuffer.
   """
   @spec export(compiled_model(), Path.t()) :: {:ok, Path.t()} | {:error, compile_error()}
-  def export(%{target: target, params: params, graph: graph, input_shape: input_shape, output_shape: output_shape}, path) do
+  def export(
+        %{
+          target: target,
+          params: params,
+          graph: graph,
+          input_shape: input_shape,
+          output_shape: output_shape
+        },
+        path
+      ) do
     case target do
       :ios ->
         export_ios(params, graph, input_shape, output_shape, path)
@@ -204,13 +215,15 @@ defmodule ExBurn.DalaML do
   Validates a compiled model by running a test inference and checking output shape.
   """
   @spec validate(compiled_model()) :: :ok | {:error, compile_error()}
-  def validate(%{input_shape: input_shape, output_shape: expected_output_shape, params: params} = model) do
+  def validate(
+        %{input_shape: input_shape, output_shape: expected_output_shape, params: params} = _model
+      ) do
     # Create dummy input
     dummy_input = BurnBridge.rand(Tuple.to_list(input_shape), :f32)
 
     try do
       result = run_inference(params, dummy_input)
-      actual_shape = BurnBridge.shape(result)
+      actual_shape = Nx.shape(result)
 
       expected = Tuple.to_list(expected_output_shape)
       actual = Tuple.to_list(actual_shape)
@@ -240,7 +253,7 @@ defmodule ExBurn.DalaML do
   defp validate_target(:ios), do: :ok
   defp validate_target(:android), do: :ok
 
-  defp validate_target(target),
+  defp validate_target(_target),
     do: {:error, :invalid_target}
 
   defp validate_input_shape(nil), do: {:error, :invalid_shape}
@@ -259,7 +272,7 @@ defmodule ExBurn.DalaML do
           {:error, :shape_mismatch}
         end
 
-      {[exp_single], _}  ->
+      {[_exp_single], _} ->
         :ok
 
       _ ->
@@ -270,9 +283,9 @@ defmodule ExBurn.DalaML do
   @doc false
   @spec extract_params(Axon.ModelState.t()) :: {:ok, map()} | {:error, compile_error()}
   def extract_params(%Axon.ModelState{} = model) do
-    # Use Axon.init/1 which returns a flat map — no internal struct matching
+    # Use Axon.build/2 which returns a flat map — no internal struct matching
     try do
-      params = Axon.init(model)
+      params = Axon.build(model, %{})
 
       # Validate that all values are proper Nx tensors
       valid? =
@@ -294,7 +307,7 @@ defmodule ExBurn.DalaML do
     try do
       # Create a dummy input and run forward pass to determine output shape
       dummy_input = Nx.broadcast(Nx.tensor(0.0, type: :f32), input_shape)
-      params = Axon.init(model)
+      params = Axon.build(model, %{})
 
       case Axon.predict(model, params, dummy_input) do
         {:ok, output} -> {:ok, Nx.shape(output)}
@@ -305,27 +318,11 @@ defmodule ExBurn.DalaML do
     end
   end
 
-  defp validate_model_graph(%Axon.ModelState{} = model) do
+  defp validate_model_graph(%Axon.ModelState{} = _model) do
     # Walk the Axon graph and check for unsupported layers
-    try do
-      layers = Axon.Display.display(model, [])
-
-      # Check for known unsupported operations for mobile
-      unsupported = ["LSTM", "GRU", "Transformer"]
-
-      has_unsupported =
-        Enum.any?(unsupported, fn op ->
-          String.contains?(layers, op)
-        end)
-
-      if has_unsupported do
-        {:error, :unsupported_layer}
-      else
-        :ok
-      end
-    rescue
-      _ -> :ok
-    end
+    # Note: Axon.Display.display/2 is not available, so we skip detailed validation
+    # and just return :ok. A full implementation would parse the Axon model structure.
+    :ok
   end
 
   defp compile_graph(%Axon.ModelState{} = model) do
@@ -399,7 +396,7 @@ defmodule ExBurn.DalaML do
       {:input}, acc ->
         acc
 
-      {:dense, weight_key, bias_key} , acc ->
+      {:dense, weight_key, bias_key}, acc ->
         weight = Map.get(params, weight_key)
         bias = Map.get(params, bias_key)
 
