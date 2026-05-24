@@ -27,14 +27,14 @@ defmodule ExBurn.BurnBridge do
   @doc "Creates a tensor filled with zeros."
   @spec zeros([non_neg_integer()], BT.type()) :: BT.t()
   def zeros(shape, type \\ :f32) do
-    ref = ExBurn.Nif.nif_zeros_tensor(shape, Atom.to_string(type))
+    ref = ExBurn.Nif.zeros_tensor(shape, Atom.to_string(type))
     %BT{ref: ref, shape: shape, type: type}
   end
 
   @doc "Creates a tensor filled with ones."
   @spec ones([non_neg_integer()], BT.type()) :: BT.t()
   def ones(shape, type \\ :f32) do
-    ref = ExBurn.Nif.nif_ones_tensor(shape, Atom.to_string(type))
+    ref = ExBurn.Nif.ones_tensor(shape, Atom.to_string(type))
     %BT{ref: ref, shape: shape, type: type}
   end
 
@@ -58,8 +58,8 @@ defmodule ExBurn.BurnBridge do
 
   @doc "Creates a random tensor with uniform distribution."
   @spec rand([non_neg_integer()], BT.type(), float(), float()) :: BT.t()
-  def rand(shape, type \\ :f32, low \\ 0.0, high \\ 1.0) do
-    ref = ExBurn.Nif.nif_zeros_tensor(shape, Atom.to_string(type))
+  def rand(shape, type \\ :f32, _low \\ 0.0, _high \\ 1.0) do
+    ref = ExBurn.Nif.zeros_tensor(shape, Atom.to_string(type))
     %BT{ref: ref, shape: shape, type: type}
   end
 
@@ -108,67 +108,67 @@ defmodule ExBurn.BurnBridge do
 
   @spec add(BT.t(), BT.t()) :: BT.t()
   def add(%BT{ref: ref_a, shape: shape, type: type}, %BT{ref: ref_b}) do
-    ref = ExBurn.Nif.nif_add_tensor(ref_a, ref_b)
+    ref = ExBurn.Nif.add_tensor(ref_a, ref_b)
     %BT{ref: ref, shape: shape, type: type}
   end
 
   @spec sub(BT.t(), BT.t()) :: BT.t()
   def sub(%BT{ref: ref_a, shape: shape, type: type}, %BT{ref: ref_b}) do
-    ref = ExBurn.Nif.nif_sub_tensor(ref_a, ref_b)
+    ref = ExBurn.Nif.sub_tensor(ref_a, ref_b)
     %BT{ref: ref, shape: shape, type: type}
   end
 
   @spec mul(BT.t(), BT.t()) :: BT.t()
   def mul(%BT{ref: ref_a, shape: shape, type: type}, %BT{ref: ref_b}) do
-    ref = ExBurn.Nif.nif_mul_tensor(ref_a, ref_b)
+    ref = ExBurn.Nif.mul_tensor(ref_a, ref_b)
     %BT{ref: ref, shape: shape, type: type}
   end
 
   @spec div(BT.t(), BT.t()) :: BT.t()
   def div(%BT{ref: ref_a, shape: shape, type: type}, %BT{ref: ref_b}) do
-    ref = ExBurn.Nif.nif_div_tensor(ref_a, ref_b)
+    ref = ExBurn.Nif.div_tensor(ref_a, ref_b)
     %BT{ref: ref, shape: shape, type: type}
   end
 
   @spec neg(BT.t()) :: BT.t()
   def neg(%BT{ref: ref, shape: shape, type: type}) do
-    ref = ExBurn.Nif.nif_neg_tensor(ref)
+    ref = ExBurn.Nif.neg_tensor(ref)
     %BT{ref: ref, shape: shape, type: type}
   end
 
   @spec abs(BT.t()) :: BT.t()
   def abs(%BT{ref: ref, shape: shape, type: type}) do
-    ref = ExBurn.Nif.nif_abs_tensor(ref)
+    ref = ExBurn.Nif.abs_tensor(ref)
     %BT{ref: ref, shape: shape, type: type}
   end
 
   @spec exp(BT.t()) :: BT.t()
   def exp(%BT{ref: ref, shape: shape, type: type}) do
-    ref = ExBurn.Nif.nif_exp_tensor(ref)
+    ref = ExBurn.Nif.exp_tensor(ref)
     %BT{ref: ref, shape: shape, type: type}
   end
 
   @spec log(BT.t()) :: BT.t()
   def log(%BT{ref: ref, shape: shape, type: type}) do
-    ref = ExBurn.Nif.nif_log_tensor(ref)
+    ref = ExBurn.Nif.log_tensor(ref)
     %BT{ref: ref, shape: shape, type: type}
   end
 
   @spec sqrt(BT.t()) :: BT.t()
   def sqrt(%BT{ref: ref, shape: shape, type: type}) do
-    ref = ExBurn.Nif.nif_sqrt_tensor(ref)
+    ref = ExBurn.Nif.sqrt_tensor(ref)
     %BT{ref: ref, shape: shape, type: type}
   end
 
   @spec sigmoid(BT.t()) :: BT.t()
   def sigmoid(%BT{ref: ref, shape: shape, type: type}) do
-    ref = ExBurn.Nif.nif_sigmoid_tensor(ref)
+    ref = ExBurn.Nif.sigmoid_tensor(ref)
     %BT{ref: ref, shape: shape, type: type}
   end
 
   @spec relu(BT.t()) :: BT.t()
   def relu(%BT{ref: ref, shape: shape, type: type}) do
-    ref = ExBurn.Nif.nif_relu_tensor(ref)
+    ref = ExBurn.Nif.relu_tensor(ref)
     %BT{ref: ref, shape: shape, type: type}
   end
 
@@ -176,7 +176,7 @@ defmodule ExBurn.BurnBridge do
 
   @spec matmul(BT.t(), BT.t()) :: BT.t()
   def matmul(%BT{ref: ref_a, type: type}, %BT{ref: ref_b}) do
-    ref = ExBurn.Nif.nif_matmul_tensor(ref_a, ref_b)
+    ref = ExBurn.Nif.matmul_tensor(ref_a, ref_b)
     shape_a = BT.shape(%BT{ref: ref_a})
     shape_b = BT.shape(%BT{ref: ref_b})
     out_shape = matmul_output_shape(shape_a, shape_b)
@@ -185,7 +185,7 @@ defmodule ExBurn.BurnBridge do
 
   @spec transpose(BT.t(), non_neg_integer(), non_neg_integer()) :: BT.t()
   def transpose(%BT{ref: ref, shape: shape, type: type}, dim0 \\ 0, dim1 \\ 1) do
-    ref = ExBurn.Nif.nif_transpose_tensor(ref)
+    ref = ExBurn.Nif.transpose_tensor(ref)
     new_shape = swap(shape, dim0, dim1)
     %BT{ref: ref, shape: new_shape, type: type}
   end
@@ -193,14 +193,14 @@ defmodule ExBurn.BurnBridge do
   # ── Reductions ───────────────────────────────────────────────────
 
   @spec sum(BT.t(), [non_neg_integer()] | nil) :: BT.t()
-  def sum(%BT{ref: ref, type: type}, axes \\ nil) do
-    ref = ExBurn.Nif.nif_sum_tensor(ref)
+  def sum(%BT{ref: ref, type: type}, _axes \\ nil) do
+    ref = ExBurn.Nif.sum_tensor(ref)
     %BT{ref: ref, shape: [1], type: type}
   end
 
   @spec mean(BT.t(), [non_neg_integer()] | nil) :: BT.t()
-  def mean(%BT{ref: ref, type: type}, axes \\ nil) do
-    ref = ExBurn.Nif.nif_mean_tensor(ref)
+  def mean(%BT{ref: ref, type: type}, _axes \\ nil) do
+    ref = ExBurn.Nif.mean_tensor(ref)
     %BT{ref: ref, shape: [1], type: type}
   end
 
@@ -208,19 +208,19 @@ defmodule ExBurn.BurnBridge do
 
   @spec reshape(BT.t(), [non_neg_integer()]) :: BT.t()
   def reshape(%BT{ref: ref, type: type}, shape) do
-    ref = ExBurn.Nif.nif_reshape_tensor(ref, shape)
+    ref = ExBurn.Nif.reshape_tensor(ref, shape)
     %BT{ref: ref, shape: shape, type: type}
   end
 
   @spec softmax(BT.t(), non_neg_integer()) :: BT.t()
   def softmax(%BT{ref: ref, shape: shape, type: type}, dim \\ -1) do
-    ref = ExBurn.Nif.nif_softmax_tensor(ref, dim)
+    ref = ExBurn.Nif.softmax_tensor(ref, dim)
     %BT{ref: ref, shape: shape, type: type}
   end
 
   @spec layer_norm(BT.t(), non_neg_integer(), float()) :: BT.t()
-  def layer_norm(%BT{ref: ref, shape: shape, type: type}, dim \\ -1, eps \\ 1.0e-5) do
-    ref = ExBurn.Nif.nif_layer_norm_tensor(ref, 0, 0.0)
+  def layer_norm(%BT{ref: ref, shape: shape, type: type}, _dim \\ -1, _eps \\ 1.0e-5) do
+    ref = ExBurn.Nif.layer_norm_tensor(ref, 0, 0.0)
     %BT{ref: ref, shape: shape, type: type}
   end
 
@@ -232,13 +232,13 @@ defmodule ExBurn.BurnBridge do
   # ── Loss Functions ───────────────────────────────────────────────
 
   @spec cross_entropy(BT.t(), BT.t()) :: BT.t()
-  def cross_entropy(%BT{ref: ref_pred, type: type}, %BT{ref: ref_target}) do
+  def cross_entropy(%BT{ref: ref_pred, type: type}, %BT{ref: _ref_target}) do
     ref = ref_pred
     %BT{ref: ref, shape: [1], type: type}
   end
 
   @spec mse(BT.t(), BT.t()) :: BT.t()
-  def mse(%BT{ref: ref_pred, type: type}, %BT{ref: ref_target}) do
+  def mse(%BT{ref: ref_pred, type: type}, %BT{ref: _ref_target}) do
     ref = ref_pred
     %BT{ref: ref, shape: [1], type: type}
   end
@@ -248,11 +248,11 @@ defmodule ExBurn.BurnBridge do
   @spec to_gpu(BT.t()) :: BT.t()
   def to_gpu(%BT{ref: ref, shape: shape, type: type} = bt) do
     # Read data from Burn tensor, create ExCubecl buffer, wrap back
-    case ExBurn.Nif.nif_tensor_to_binary(ref) do
+    case ExBurn.Nif.tensor_to_binary(ref) do
       binary ->
         # Convert binary to flat list for ExCubecl
         flat_data = for <<x::float-32 <- binary>>, do: x
-        nx_type = BT.burn_type_to_nx(type)
+        _nx_type = BT.burn_type_to_nx(type)
 
         case ExCubecl.buffer(flat_data, shape, type) do
           {:ok, buf} ->
@@ -287,7 +287,7 @@ defmodule ExBurn.BurnBridge do
   # ── Memory ───────────────────────────────────────────────────────
 
   @spec free(BT.t()) :: :ok
-  def free(%BT{ref: ref}), do: ExBurn.Nif.nif_free_tensor(ref)
+  def free(%BT{ref: ref}), do: ExBurn.Nif.free_tensor(ref)
 
   # ── Private Helpers ──────────────────────────────────────────────
 

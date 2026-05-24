@@ -940,7 +940,7 @@ defmodule ExBurn.Backend do
     axes = opts[:axes] || []
 
     case axes do
-      [axis] ->
+      [_axis] ->
         a = maybe_cast(a, :f32)
 
         with {:ok, ref} <- Nif.max_tensor(a.ref),
@@ -968,7 +968,7 @@ defmodule ExBurn.Backend do
     axes = opts[:axes] || []
 
     case axes do
-      [axis] ->
+      [_axis] ->
         a = maybe_cast(a, :f32)
 
         with {:ok, ref} <- Nif.min_tensor(a.ref),
@@ -1037,7 +1037,7 @@ defmodule ExBurn.Backend do
 
   @impl true
   @spec transpose(Nx.Tensor.t(), t(), [non_neg_integer()]) :: t()
-  def transpose(_out, %__MODULE__{} = a, axes) do
+  def transpose(_out, %__MODULE__{} = a, _axes) do
     a = maybe_cast(a, :f32)
 
     with {:ok, ref} <- Nif.transpose_tensor(a.ref),
@@ -1130,7 +1130,7 @@ defmodule ExBurn.Backend do
       Enum.zip([start_indices, lengths])
       |> Enum.map(fn {s, l} -> {s, s + l, 1} end)
 
-    with {:ok, ref} <- Nif.slice_tensor(a.ref, ranges),
+    with {:ok, ref} <- ExBurn.NifHelper.slice_tensor(a.ref, ranges),
          {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
@@ -1183,7 +1183,7 @@ defmodule ExBurn.Backend do
         end
       end)
 
-    with {:ok, ref} <- Nif.slice_tensor(a.ref, ranges),
+    with {:ok, ref} <- ExBurn.NifHelper.slice_tensor(a.ref, ranges),
          {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
@@ -1214,7 +1214,7 @@ defmodule ExBurn.Backend do
     low = opts[:low] || 0.0
     high = opts[:high] || 1.0
 
-    with {:ok, ref} <- Nif.random_tensor(shape, "f32", low, high),
+    with {:ok, ref} <- ExBurn.NifHelper.random_tensor(shape, "f32", low, high),
          {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
@@ -1229,7 +1229,7 @@ defmodule ExBurn.Backend do
     mean = opts[:mean] || 0.0
     std = opts[:std] || 1.0
 
-    with {:ok, ref} <- Nif.random_tensor(shape, "f32", mean - 2 * std, mean + 2 * std),
+    with {:ok, ref} <- ExBurn.NifHelper.random_tensor(shape, "f32", mean - 2 * std, mean + 2 * std),
          {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
@@ -1296,7 +1296,7 @@ defmodule ExBurn.Backend do
     stride = opts[:stride] || [1, 1]
     padding = opts[:padding] || [0, 0]
 
-    with {:ok, ref} <- Nif.conv2d_tensor(input.ref, kernel.ref, stride, padding),
+    with {:ok, ref} <- ExBurn.NifHelper.conv2d_tensor(input.ref, kernel.ref, stride, padding),
          {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else

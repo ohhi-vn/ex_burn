@@ -36,11 +36,13 @@ defmodule ExBurnTest do
       :ok
     end
 
+    @tag :nif
     test "tensor creation from binary" do
       t = Nx.tensor([1.0, 2.0, 3.0])
       assert Nx.to_list(t) == [1.0, 2.0, 3.0]
     end
 
+    @tag :nif
     test "addition" do
       a = Nx.tensor([1.0, 2.0, 3.0])
       b = Nx.tensor([4.0, 5.0, 6.0])
@@ -48,6 +50,7 @@ defmodule ExBurnTest do
       assert Nx.to_list(c) == [5.0, 7.0, 9.0]
     end
 
+    @tag :nif
     test "subtraction" do
       a = Nx.tensor([4.0, 5.0, 6.0])
       b = Nx.tensor([1.0, 2.0, 3.0])
@@ -55,6 +58,7 @@ defmodule ExBurnTest do
       assert Nx.to_list(c) == [3.0, 3.0, 3.0]
     end
 
+    @tag :nif
     test "multiplication" do
       a = Nx.tensor([1.0, 2.0, 3.0])
       b = Nx.tensor([4.0, 5.0, 6.0])
@@ -62,6 +66,7 @@ defmodule ExBurnTest do
       assert Nx.to_list(c) == [4.0, 10.0, 18.0]
     end
 
+    @tag :nif
     test "division" do
       a = Nx.tensor([4.0, 10.0, 18.0])
       b = Nx.tensor([2.0, 5.0, 6.0])
@@ -69,18 +74,21 @@ defmodule ExBurnTest do
       assert Nx.to_list(c) == [2.0, 2.0, 3.0]
     end
 
+    @tag :nif
     test "negation" do
       a = Nx.tensor([1.0, -2.0, 3.0])
       c = Nx.negate(a)
       assert Nx.to_list(c) == [-1.0, 2.0, -3.0]
     end
 
+    @tag :nif
     test "absolute value" do
       a = Nx.tensor([-1.0, 2.0, -3.0])
       c = Nx.abs(a)
       assert Nx.to_list(c) == [1.0, 2.0, 3.0]
     end
 
+    @tag :nif
     test "2D tensor operations" do
       a = Nx.tensor([[1.0, 2.0], [3.0, 4.0]])
       b = Nx.tensor([[5.0, 6.0], [7.0, 8.0]])
@@ -88,24 +96,28 @@ defmodule ExBurnTest do
       assert Nx.to_list(c) == [6.0, 8.0, 10.0, 12.0]
     end
 
+    @tag :nif
     test "transpose" do
       a = Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
       c = Nx.transpose(a)
       assert Nx.shape(c) == {3, 2}
     end
 
+    @tag :nif
     test "reshape" do
       a = Nx.tensor([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
       c = Nx.reshape(a, {2, 3})
       assert Nx.shape(c) == {2, 3}
     end
 
+    @tag :nif
     test "sum reduction" do
       a = Nx.tensor([1.0, 2.0, 3.0])
       c = Nx.sum(a)
       assert Nx.to_list(c) == [6.0]
     end
 
+    @tag :nif
     test "mean reduction" do
       a = Nx.tensor([1.0, 2.0, 3.0, 4.0])
       c = Nx.mean(a)

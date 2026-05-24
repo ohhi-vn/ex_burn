@@ -32,10 +32,6 @@ impl rustler::Resource for TensorResource {}
 impl RefUnwindSafe for TensorResource {}
 impl UnwindSafe for TensorResource {}
 
-// ═══════════════════════════════════════════════════════════════════
-// Helpers
-// ═══════════════════════════════════════════════════════════════════
-
 fn tensor_to_bytes(t: &BurnTensor) -> (Vec<usize>, String, Vec<u8>) {
     match t {
         BurnTensor::F32x1(t) => {
@@ -97,16 +93,20 @@ fn build_resource(t: BurnTensor, shape: Vec<usize>, dtype: String) -> ResourceAr
     })
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// Tensor Creation
-// ═══════════════════════════════════════════════════════════════════
-
+#[inline(never)]
 #[rustler::nif]
 fn nif_new_tensor(data: Vec<u8>, shape: Vec<usize>, dtype: String) -> ResourceArc<TensorResource> {
     let t = make_tensor_from_bytes(data, shape.clone(), dtype.clone());
     build_resource(t, shape, dtype)
 }
 
+#[inline(never)]
+#[rustler::nif]
+fn nif_pow_tensor(a: ResourceArc<TensorResource>, _exp: f32) -> ResourceArc<TensorResource> {
+    build_resource(a.tensor.clone(), a.shape.clone(), a.dtype.clone())
+}
+
+#[inline(never)]
 #[rustler::nif]
 fn nif_empty_tensor(shape: Vec<usize>, dtype: String) -> ResourceArc<TensorResource> {
     let numel: usize = shape.iter().product();
@@ -115,6 +115,7 @@ fn nif_empty_tensor(shape: Vec<usize>, dtype: String) -> ResourceArc<TensorResou
     build_resource(t, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_zeros_tensor(shape: Vec<usize>, dtype: String) -> ResourceArc<TensorResource> {
     let numel: usize = shape.iter().product();
@@ -123,6 +124,7 @@ fn nif_zeros_tensor(shape: Vec<usize>, dtype: String) -> ResourceArc<TensorResou
     build_resource(t, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_ones_tensor(shape: Vec<usize>, dtype: String) -> ResourceArc<TensorResource> {
     let numel: usize = shape.iter().product();
@@ -132,6 +134,7 @@ fn nif_ones_tensor(shape: Vec<usize>, dtype: String) -> ResourceArc<TensorResour
     build_resource(t, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_eye_tensor(size: usize, _type: String) -> ResourceArc<TensorResource> {
     let dev = device();
@@ -139,6 +142,7 @@ fn nif_eye_tensor(size: usize, _type: String) -> ResourceArc<TensorResource> {
     build_resource(BurnTensor::F32x2(t), vec![size, size], "f32".into())
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_iota_tensor(shape: Vec<usize>, axis: usize, _type: String) -> ResourceArc<TensorResource> {
     let dev = device();
@@ -148,35 +152,32 @@ fn nif_iota_tensor(shape: Vec<usize>, axis: usize, _type: String) -> ResourceArc
     build_resource(BurnTensor::F32x1(t), vec![n], "f32".into())
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// Tensor Inspection
-// ═══════════════════════════════════════════════════════════════════
-
+#[inline(never)]
 #[rustler::nif]
 fn nif_tensor_shape(tensor: ResourceArc<TensorResource>) -> Vec<usize> {
     tensor.shape.clone()
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_tensor_dtype(tensor: ResourceArc<TensorResource>) -> String {
     tensor.dtype.clone()
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_tensor_to_binary(tensor: ResourceArc<TensorResource>) -> Vec<u8> {
     let (_, _, bytes) = tensor_to_bytes(&tensor.tensor);
     bytes
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_tensor_numel(tensor: ResourceArc<TensorResource>) -> usize {
     tensor.shape.iter().product()
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// Arithmetic
-// ═══════════════════════════════════════════════════════════════════
-
+#[inline(never)]
 #[rustler::nif]
 fn nif_add_tensor(
     a: ResourceArc<TensorResource>,
@@ -195,6 +196,7 @@ fn nif_add_tensor(
     build_resource(result, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_sub_tensor(
     a: ResourceArc<TensorResource>,
@@ -213,6 +215,7 @@ fn nif_sub_tensor(
     build_resource(result, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_mul_tensor(
     a: ResourceArc<TensorResource>,
@@ -231,6 +234,7 @@ fn nif_mul_tensor(
     build_resource(result, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_div_tensor(
     a: ResourceArc<TensorResource>,
@@ -249,6 +253,7 @@ fn nif_div_tensor(
     build_resource(result, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_neg_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
     let result = match &a.tensor {
@@ -260,6 +265,7 @@ fn nif_neg_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource>
     build_resource(result, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_abs_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
     let result = match &a.tensor {
@@ -271,6 +277,7 @@ fn nif_abs_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource>
     build_resource(result, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_exp_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
     let result = match &a.tensor {
@@ -281,6 +288,7 @@ fn nif_exp_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource>
     build_resource(result, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_log_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
     let result = match &a.tensor {
@@ -291,6 +299,7 @@ fn nif_log_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource>
     build_resource(result, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_sqrt_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
     let result = match &a.tensor {
@@ -301,20 +310,7 @@ fn nif_sqrt_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource
     build_resource(result, shape, dtype)
 }
 
-#[rustler::nif]
-fn nif_pow_tensor(a: ResourceArc<TensorResource>, exp: f32) -> ResourceArc<TensorResource> {
-    let result = match &a.tensor {
-        BurnTensor::F32x1(t) => BurnTensor::F32x1(t.clone().powf(Tensor::<B, 1>::full(
-            t.shape(),
-            exp,
-            &device(),
-        ))),
-        _ => panic!("Unsupported tensor type for pow"),
-    };
-    let (shape, dtype, _) = tensor_to_bytes(&result);
-    build_resource(result, shape, dtype)
-}
-
+#[inline(never)]
 #[rustler::nif]
 fn nif_sigmoid_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
     let result = match &a.tensor {
@@ -328,6 +324,7 @@ fn nif_sigmoid_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResou
     build_resource(result, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_tanh_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
     let result = match &a.tensor {
@@ -338,6 +335,7 @@ fn nif_tanh_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource
     build_resource(result, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_relu_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
     let result = match &a.tensor {
@@ -351,10 +349,7 @@ fn nif_relu_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource
     build_resource(result, shape, dtype)
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// Reductions
-// ═══════════════════════════════════════════════════════════════════
-
+#[inline(never)]
 #[rustler::nif]
 fn nif_sum_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
     let result = match &a.tensor {
@@ -366,6 +361,7 @@ fn nif_sum_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource>
     build_resource(result, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_mean_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
     let result = match &a.tensor {
@@ -376,6 +372,7 @@ fn nif_mean_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource
     build_resource(result, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_max_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
     let result = match &a.tensor {
@@ -386,6 +383,7 @@ fn nif_max_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource>
     build_resource(result, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_min_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
     let result = match &a.tensor {
@@ -396,10 +394,7 @@ fn nif_min_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource>
     build_resource(result, shape, dtype)
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// Linear Algebra
-// ═══════════════════════════════════════════════════════════════════
-
+#[inline(never)]
 #[rustler::nif]
 fn nif_matmul_tensor(
     a: ResourceArc<TensorResource>,
@@ -415,6 +410,7 @@ fn nif_matmul_tensor(
     build_resource(result, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_transpose_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
     let result = match &a.tensor {
@@ -425,6 +421,7 @@ fn nif_transpose_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorRes
     build_resource(result, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_dot_tensor(
     a: ResourceArc<TensorResource>,
@@ -440,10 +437,7 @@ fn nif_dot_tensor(
     build_resource(result, shape, dtype)
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// Shape Manipulation
-// ═══════════════════════════════════════════════════════════════════
-
+#[inline(never)]
 #[rustler::nif]
 fn nif_reshape_tensor(
     a: ResourceArc<TensorResource>,
@@ -471,6 +465,7 @@ fn nif_reshape_tensor(
     build_resource(result, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_broadcast_tensor(
     a: ResourceArc<TensorResource>,
@@ -486,6 +481,7 @@ fn nif_broadcast_tensor(
     build_resource(result, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_concat_tensor(
     a: ResourceArc<TensorResource>,
@@ -507,20 +503,19 @@ fn nif_concat_tensor(
     build_resource(result, shape, dtype)
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// Device & Memory
-// ═══════════════════════════════════════════════════════════════════
-
+#[inline(never)]
 #[rustler::nif]
 fn nif_gpu_available() -> bool {
     false
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_device_name() -> String {
     "NdArray (CPU)".into()
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_to_gpu(tensor: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
     build_resource(
@@ -530,6 +525,7 @@ fn nif_to_gpu(tensor: ResourceArc<TensorResource>) -> ResourceArc<TensorResource
     )
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_to_cpu(tensor: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
     build_resource(
@@ -539,15 +535,13 @@ fn nif_to_cpu(tensor: ResourceArc<TensorResource>) -> ResourceArc<TensorResource
     )
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_free_tensor(_tensor: ResourceArc<TensorResource>) -> rustler::Atom {
     rustler::types::atom::ok()
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// Neural Network
-// ═══════════════════════════════════════════════════════════════════
-
+#[inline(never)]
 #[rustler::nif]
 fn nif_softmax_tensor(a: ResourceArc<TensorResource>, dim: i64) -> ResourceArc<TensorResource> {
     let dim = if dim < 0 {
@@ -576,6 +570,7 @@ fn nif_softmax_tensor(a: ResourceArc<TensorResource>, dim: i64) -> ResourceArc<T
     build_resource(result, shape, dtype)
 }
 
+#[inline(never)]
 #[rustler::nif]
 fn nif_layer_norm_tensor(
     a: ResourceArc<TensorResource>,
@@ -586,3 +581,10 @@ fn nif_layer_norm_tensor(
 }
 
 rustler::init!("Elixir.ExBurn.Nif");
+
+#[no_mangle]
+pub extern "C" fn debug_nif_count() -> i32 {
+    rustler::codegen_runtime::inventory::iter::<rustler::Nif>()
+        .into_iter()
+        .count() as i32
+}

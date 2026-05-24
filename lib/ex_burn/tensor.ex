@@ -72,7 +72,7 @@ defmodule ExBurn.Tensor do
     type = nx_type_to_burn(Nx.type(tensor))
 
     try do
-      ref = ExBurn.Nif.nif_new_tensor(data, shape, Atom.to_string(type))
+      ref = ExBurn.Nif.new_tensor(data, shape, Atom.to_string(type))
       {:ok, %__MODULE__{ref: ref, shape: shape, type: type}}
     rescue
       e -> {:error, Exception.message(e)}
@@ -90,7 +90,7 @@ defmodule ExBurn.Tensor do
     nx_type = burn_type_to_nx(type)
 
     try do
-      binary = ExBurn.Nif.nif_tensor_to_binary(ref)
+      binary = ExBurn.Nif.tensor_to_binary(ref)
 
       tensor =
         binary
@@ -147,7 +147,7 @@ defmodule ExBurn.Tensor do
           {:ok, t()} | {:error, String.t()}
   def from_binary(data, shape, type) do
     try do
-      ref = ExBurn.Nif.nif_new_tensor(data, shape, Atom.to_string(type))
+      ref = ExBurn.Nif.new_tensor(data, shape, Atom.to_string(type))
       {:ok, %__MODULE__{ref: ref, shape: shape, type: type}}
     rescue
       e -> {:error, Exception.message(e)}
@@ -180,5 +180,5 @@ defmodule ExBurn.Tensor do
 
   @doc "Frees the underlying Rust tensor."
   @spec free(t()) :: :ok
-  def free(%__MODULE__{ref: ref}), do: ExBurn.Nif.nif_free_tensor(ref)
+  def free(%__MODULE__{ref: ref}), do: ExBurn.Nif.free_tensor(ref)
 end

@@ -2,7 +2,7 @@ defmodule ExBurn.MixProject do
   use Mix.Project
 
   @app :ex_burn
-  @version "0.1.0"
+  @version "0.1.1"
   @github_url "https://github.com/ohhi-vn/ex_burn"
 
   def project do
@@ -30,11 +30,11 @@ defmodule ExBurn.MixProject do
   defp deps do
     [
       # Nx tensor computation
-      {:nx, ">= 0.7.0 and < 2.0.0"},
+      {:nx, ">= 0.12.0 and < 2.0.0"},
       # Rust NIF integration
       {:rustler, "~> 0.37.0", runtime: false},
       # Neural network library
-      {:axon, "~> 0.7", optional: true},
+      {:axon, "~> 0.8", optional: true},
       # Classical ML algorithms
       {:scholar, "~> 0.4", optional: true},
       # CubeCL GPU backend
@@ -62,9 +62,13 @@ defmodule ExBurn.MixProject do
       },
       files: ~w(
         lib
+        priv
         native/ex_burn_nif/Cargo.toml
         native/ex_burn_nif/Cargo.lock
         native/ex_burn_nif/src
+        guides
+        examples
+        .formatter.exs
         mix.exs
         mix.lock
         README.md

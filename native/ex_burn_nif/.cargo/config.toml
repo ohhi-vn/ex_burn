@@ -1,2 +1,2 @@
 [target.aarch64-apple-darwin]
-rustflags = ["-Clink-dead-code", "-Cllvm-args=-enable-linkonceodr-outlining=false"]
+rustflags = ["-Clink-arg=-Wl,-all_load"]
