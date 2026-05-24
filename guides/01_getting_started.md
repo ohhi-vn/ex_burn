@@ -7,7 +7,7 @@ Add `ex_burn` to your `mix.exs`:
 ```elixir
 def deps do
   [
-    {:ex_burn, github: "ohhi-vn/ex_burn"},
+    {:ex_burn, "~> 0.1"},
     {:nx, ">= 0.7.0"},
     {:axon, "~> 0.7"},
     {:ex_cubecl, ">= 0.4.0"}

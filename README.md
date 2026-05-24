@@ -122,15 +122,12 @@ Add `ex_burn` to your `mix.exs`:
 ```elixir
 def deps do
   [
-    {:ex_burn, github: "ohhi-vn/ex_burn"},
+    {:ex_burn, "~> 0.1"},
     {:nx, ">= 0.7.0"},
     {:axon, "~> 0.7"}
   ]
 end
 ```
-
-> **Note**: ExBurn is not yet published to Hex.pm. Install from GitHub until
-> the first stable release.
 
 ## Training on Mobile — Caveats
 
