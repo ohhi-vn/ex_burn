@@ -1,58 +1,72 @@
-# Mobile Deployment with ExBurn + Dala
+# Mobile Deployment with ExBurn
 
 ## Overview
 
-ExBurn compiles trained models for mobile deployment via the Dala framework.
+ExBurn compiles trained models for mobile deployment via Burn's CubeCL backend.
 The pipeline optimizes models for the target GPU backend:
 
 - **iOS**: Metal via CubeCL
 - **Android**: Vulkan via CubeCL
 
-## Compiling for Mobile
+ExBurn is designed as a library — it provides the Nx backend and GPU
+acceleration layer that other frameworks can build on top of.
+
+## Compiling a Model
 
 ```elixir
-# Compile for iOS
-{:ok, ios_model} = ExBurn.DalaML.compile(model,
-  input_shape: {1, 784},
-  target: :ios,
-  precision: :f16    # f16 quantization for mobile efficiency
+# Define a model with Axon
+model =
+  Axon.input("input", shape: {nil, 784})
+  |> Axon.dense(128, activation: :relu)
+  |> Axon.dropout(rate: 0.2)
+  |> Axon.dense(10)
+
+# Compile for training/inference
+compiled = ExBurn.Model.compile(model,
+  loss: :cross_entropy,
+  optimizer: :adam,
+  learning_rate: 0.001
 )
 
-# Compile for Android
-{:ok, android_model} = ExBurn.DalaML.compile(model,
-  input_shape: {1, 784},
-  target: :android,
-  precision: :f16
+# Run inference
+{:ok, output} = ExBurn.Model.predict(compiled, input_tensor)
+
+# Save for deployment
+ExBurn.Model.save(compiled, "model.bin")
+
+# Load
+{:ok, loaded} = ExBurn.Model.load(compiled, "model.bin")
+```
+
+## Using ExCubecl for GPU Inference
+
+ExBurn integrates with ExCubecl for GPU buffer management and kernel execution:
+
+```elixir
+# Create GPU buffers via ExCubecl
+{:ok, input_buf} = ExCubecl.buffer([1.0, 2.0, 3.0], [3], :f32)
+{:ok, output_buf} = ExCubecl.buffer([0.0, 0.0, 0.0], [3], :f32)
+
+# Run a kernel
+ExCubecl.run_kernel("elementwise_add", [input_buf, input_buf], output_buf)
+
+# Read results back
+{:ok, data} = ExCubecl.read(output_buf)
+```
+
+## Using ExBurn.Serving for Batched Inference
+
+For production inference with concurrent batching:
+
+```elixir
+# Build a serving from a compiled model
+serving = ExBurn.Serving.build(compiled,
+  batch_size: 32,
+  batch_timeout: 50
 )
-```
 
-## Running Inference
-
-```elixir
-{:ok, output} = ExBurn.DalaML.predict(compiled_model, input_tensor)
-```
-
-## Exporting
-
-```elixir
-# Export for iOS deployment
-{:ok, path} = ExBurn.DalaML.export(ios_model, "model_ios.bin")
-
-# Export for Android deployment
-{:ok, path} = ExBurn.DalaML.export(android_model, "model_android.bin")
-```
-
-## Benchmarking
-
-```elixir
-{:ok, stats} = ExBurn.DalaML.benchmark(compiled_model,
-  iterations: 100,
-  warmup: 10
-)
-
-IO.puts("Avg: #{stats.avg_milliseconds}ms")
-IO.puts("Min: #{stats.min_microseconds}μs")
-IO.puts("Max: #{stats.max_microseconds}μs")
+# Run batched inference
+output = Nx.Serving.run(serving, input_tensor)
 ```
 
 ## Model Optimization Tips
@@ -60,28 +74,8 @@ IO.puts("Max: #{stats.max_microseconds}μs")
 1. **Use f16 quantization**: Halves memory usage with minimal accuracy loss
 2. **Reduce model size**: Target < 10MB for mobile apps
 3. **Batch inference**: Process multiple inputs together for better throughput
-4. **Profile on device**: Use `ExBurn.DalaML.benchmark/2` on the target device
-
-## Integration with Dala
-
-In your Dala app:
-
-```elixir
-defmodule MyApp.ML do
-  use Dala.Plugin
-
-  component "image_classifier" do
-    prop "model_path", :string
-    prop "input_size", :integer
-    prop "num_classes", :integer
-
-    event "prediction"
-
-    native "ios", "ExBurnClassifierView"
-    native "android", "com.exburn.ClassifierView"
-  end
-end
-```
+4. **Use ExCubecl pipelines**: Chain multiple GPU kernels without CPU round-trips
+5. **Profile on device**: Benchmark on the target hardware before deploying
 
 ## Supported Operations
 

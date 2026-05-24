@@ -7,9 +7,10 @@ Add `ex_burn` to your `mix.exs`:
 ```elixir
 def deps do
   [
-    {:ex_burn, "~> 0.1.0"},
-    {:nx, "~> 0.7"},
-    {:axon, "~> 0.7"}
+    {:ex_burn, github: "ohhi-vn/ex_burn"},
+    {:nx, ">= 0.7.0"},
+    {:axon, "~> 0.7"},
+    {:ex_cubecl, ">= 0.4.0"}
   ]
 end
 ```
@@ -20,6 +21,8 @@ Then run:
 mix deps.get
 mix compile
 ```
+
+> **Note**: ExBurn is not yet on Hex.pm. Install from GitHub until the first stable release.
 
 ## Basic Tensor Operations
 
@@ -58,12 +61,66 @@ nx_tensor = ExBurn.BurnBridge.to_nx(t3)
 
 ## Checking GPU Availability
 
+ExBurn uses [ExCubecl](https://hex.pm/packages/ex_cubecl) for GPU buffer management and kernel execution:
+
 ```elixir
-if ExBurn.Nif.gpu_available() do
-  IO.puts("GPU: #{ExBurn.Nif.device_name()}")
+# Check if ExCubecl (GPU runtime) is available
+if ExCubecl.available?() do
+  {:ok, info} = ExCubecl.device_info()
+  IO.puts("GPU: #{info.device_name}")
+else
+  IO.puts("Running on CPU (ExCubecl not available)")
+end
+```
+
+You can also use the ExBurn helper:
+
+```elixir
+if ExBurn.NifHelper.gpu_available() do
+  IO.puts("GPU: #{ExBurn.NifHelper.device_name()}")
 else
   IO.puts("Running on CPU")
 end
+```
+
+## Using ExCubecl Buffers Directly
+
+For GPU-native workflows, create buffers directly via ExCubecl:
+
+```elixir
+# Create GPU buffers
+{:ok, a} = ExCubecl.buffer([1.0, 2.0, 3.0], [3], :f32)
+{:ok, b} = ExCubecl.buffer([4.0, 5.0, 6.0], [3], :f32)
+
+# Inspect
+{:ok, [3]} = ExCubecl.shape(a)
+{:ok, "f32"} = ExCubecl.dtype(a)
+{:ok, 12} = ExCubecl.size(a)  # bytes
+
+# Read data back
+{:ok, data} = ExCubecl.read(a)
+
+# Run a kernel
+output = ExCubecl.buffer!([0.0, 0.0, 0.0], [3], :f32)
+ExCubecl.run_kernel("elementwise_add", [a, b], output)
+
+# Buffers are automatically freed when GC'd — no manual free needed
+```
+
+## Using the CubeclBridge
+
+`ExBurn.CubeclBridge` provides a higher-level wrapper around ExCubecl with pipeline support:
+
+```elixir
+# Check available backends
+ExBurn.CubeclBridge.available_backends()
+
+# Create a pipeline
+{:ok, pipeline} = ExBurn.CubeclBridge.pipeline()
+ExBurn.CubeclBridge.pipeline_add(pipeline, "elementwise_add", [a, b], output)
+ExBurn.CubeclBridge.pipeline_add(pipeline, "relu", [output], output)
+{:ok, _cmd_ids} = ExBurn.CubeclBridge.pipeline_run(pipeline)
+:ok = ExBurn.CubeclBridge.pipeline_free(pipeline)
 ```
 
 ## Next Steps

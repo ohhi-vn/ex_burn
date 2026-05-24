@@ -10,6 +10,14 @@
 │                                         │                   │
 │                                         ↓                   │
 │                              ExBurn.Nif (Rustler)           │
+│                                         │                   │
+│                                         ↕                   │
+│                              ExCubecl (GPU runtime)         │
+│                              - Buffer management            │
+│                              - Kernel execution             │
+│                              - Pipeline orchestration       │
+│                              - Async commands               │
+│                              - Media I/O                    │
 └─────────────────────────────┬───────────────────────────────┘
                               │ NIF calls
 ┌─────────────────────────────↓───────────────────────────────┐
@@ -90,12 +98,25 @@ input → Linear → ReLU → output
          optimizer.step()  ← Adam/SGD updates W -= lr * ∂L/∂W
 ```
 
+## ExCubecl Integration
+
+ExBurn uses [ExCubecl](https://hex.pm/packages/ex_cubecl) v0.4+ as its GPU compute runtime. ExCubecl provides:
+
+- **GPU Buffers**: `ExCubecl.buffer/3` creates GPU-resident buffers with automatic GC
+- **Kernel Execution**: `ExCubecl.run_kernel/4` dispatches CubeCL kernels
+- **Pipelines**: `ExCubecl.pipeline/0` + `pipeline_add/5` + `pipeline_run/1` for multi-kernel orchestration
+- **Async Commands**: `ExCubecl.submit/1` + `poll/1` + `wait/1` for non-blocking execution
+- **Media I/O**: `ExCubecl.Media`, `ExCubecl.Video`, `ExCubecl.Audio`, `ExCubecl.Filter`, `ExCubecl.Transcode`
+
+`ExBurn.CubeclBridge` wraps ExCubecl with a higher-level API, and `ExBurn.BurnBridge` provides ExCubecl buffer helpers.
+
 ## Performance Considerations
 
 1. **Minimize NIF round-trips**: Use `BurnBridge` for multi-op sequences
 2. **Batch conversions**: `ExBurn.Tensor.from_nx_batch/1` for multiple tensors
 3. **Shape caching**: Shapes tracked on Elixir side, no NIF call needed
 4. **f16 on mobile**: Use `precision: :f16` for 2x memory reduction
+5. **Use ExCubecl pipelines**: Chain multiple GPU kernels without CPU round-trips
 
 ## Error Handling
 

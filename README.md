@@ -1,6 +1,13 @@
 # ExBurn
 
-**ExBurn** is a middle layer between [Nx](https://github.com/elixir-nx/nx) and [Burn](https://github.com/tracel-ai/burn) that enables training ML/DeepLearning models on mobile devices via the [Dala](https://github.com/ohhi-vn/dala) framework.
+[![CI](https://github.com/ohhi-vn/ex_burn/actions/workflows/ci.yml/badge.svg)](https://github.com/ohhi-vn/ex_burn/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Hex.pm](https://img.shields.io/hexpm/v/ex_burn.svg)](https://hex.pm/packages/ex_burn)
+[![Documentation](https://img.shields.io/badge/hexdocs-docs-purple.svg)](https://hexdocs.pm/ex_burn)
+
+> **Status:** Early development. Not yet ready for production use.
+
+**ExBurn** is a middle layer between [Nx](https://github.com/elixir-nx/nx) and [Burn](https://github.com/tracel-ai/burn) that enables GPU-accelerated ML/DL on mobile and desktop devices.
 
 ## Architecture
 
@@ -11,7 +18,7 @@ Nx.Defn graph
    ↓
 ExBurn.Backend (Nx.Backend behaviour)
    ↓
-ExBurn.Nif (Rustler NIF)
+ExBurn.Nif (Rustler NIF) ←→ ExCubecl (GPU buffers, kernels, pipelines)
    ↓
 Burn Autodiff<CubeCL> (Rust)
    ↓
@@ -34,7 +41,7 @@ Metal (iOS) / Vulkan (Android) / CUDA → GPU
 | GPU acceleration (Metal/Vulkan) | ✅ Via Burn/CubeCL |
 | Axon model compilation | 🔄 Basic support |
 | Training loop (SGD/Adam/RMSprop) | 🔄 Basic support |
-| Mobile deployment (Dala) | 🚧 Planned |
+| Nx.Serving | ✅ Implemented |
 | Nx.Defn.Compiler | 🚧 Planned |
 | CUDA backend | 🚧 Planned |
 | Precompiled NIF binaries | 🚧 Planned |
@@ -47,8 +54,8 @@ Metal (iOS) / Vulkan (Android) / CUDA → GPU
 
 - **Nx Backend**: Full `Nx.Backend` behaviour implementation — drop-in replacement for `Nx.BinaryBackend`
 - **GPU Acceleration**: Burn's CubeCL backend with Metal (Apple), Vulkan (Android), CUDA (NVIDIA)
+- **ExCubecl Integration**: GPU buffer management, kernel execution, async commands, and pipeline orchestration via [ExCubecl](https://hex.pm/packages/ex_cubecl)
 - **Autodiff**: Automatic differentiation via Burn's `Autodiff` backend decorator
-- **Mobile Deployment**: Compile models for iOS/Android via `ExBurn.DalaML`
 - **Training Loop**: Complete training with Adam, SGD, RMSprop optimizers, LR scheduling, gradient clipping, callbacks
 - **Model Management**: Save/load, serialize, quantize (f16), benchmark
 - **Structured Errors**: `ExBurn.Error` exception type with operation context
@@ -89,29 +96,54 @@ ExBurn.Training.fit(compiled, {train_x, train_y},
 )
 ```
 
-## Mobile Deployment (Dala)
+## Prerequisites
 
-> **Note**: `ExBurn.DalaML` is tightly coupled to the Dala framework and is
-> currently aspirational. The core Nx backend works independently.
+- **Elixir** ~> 1.18 and **OTP** 27+
+- **Rust** stable toolchain (required for NIF compilation)
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  ```
+- **For iOS development**: Xcode + `aarch64-apple-ios` target
+  ```bash
+  rustup target add aarch64-apple-ios
+  ```
+- **For Android development**: Android NDK + `aarch64-linux-android` target
+  ```bash
+  rustup target add aarch64-linux-android
+  ```
+
+> **Note**: Precompiled NIF binaries are planned for v0.2.0. Until then, a Rust
+> toolchain is required to build the NIF from source.
+
+## Installation
+
+Add `ex_burn` to your `mix.exs`:
 
 ```elixir
-# Compile for iOS (Metal GPU)
-{:ok, model} = ExBurn.DalaML.compile(axon_model,
-  input_shape: {1, 784},
-  target: :ios,
-  precision: :f16
-)
-
-# Run inference
-{:ok, output} = ExBurn.DalaML.predict(model, input_tensor)
-
-# Export for deployment
-ExBurn.DalaML.export(model, "model_ios.bin")
-
-# Benchmark
-{:ok, stats} = ExBurn.DalaML.benchmark(model, iterations: 100)
-IO.puts("Avg: #{stats.avg_milliseconds}ms, P95: #{stats.p95_microseconds}μs")
+def deps do
+  [
+    {:ex_burn, github: "ohhi-vn/ex_burn"},
+    {:nx, ">= 0.7.0"},
+    {:axon, "~> 0.7"}
+  ]
+end
 ```
+
+> **Note**: ExBurn is not yet published to Hex.pm. Install from GitHub until
+> the first stable release.
+
+## Training on Mobile — Caveats
+
+Burn's Autodiff backend is memory-intensive. On iOS/Android with limited RAM,
+training even small models may cause out-of-memory errors. Realistic expectations:
+
+- **Fine-tuning** small models (< 10M parameters) is feasible on modern devices
+- **Full training** of large models is not recommended on mobile
+- **Inference** is the primary use case for mobile deployment
+- Minimum recommended: 4GB RAM, A12+ chip (iOS) / Snapdragon 700+ (Android)
+
+The training loop in ExBurn currently uses numerical gradients. Burn's autodiff
+integration is planned for v0.3.0.
 
 ## Examples
 
@@ -122,8 +154,8 @@ mix run examples/linear_regression.exs
 # MNIST-like classifier (full deep learning pipeline)
 mix run examples/mnist_simple.exs
 
-# Mobile deployment (iOS + Android compilation and benchmarking)
-mix run examples/mobile_inference.exs
+# GPU-accelerated inference with ExCubecl
+mix run examples/gpu_inference.exs
 ```
 
 ## Project Structure
@@ -136,8 +168,7 @@ lib/ex_burn/
   tensor.ex           — Nx ↔ Burn tensor conversion utilities
   error.ex            — Structured error type (ExBurn.Error)
   burn_bridge.ex      — High-level Burn API (direct tensor ops)
-  cubecl_bridge.ex    — GPU context management (Metal/Vulkan)
-  dala_ml.ex          — Mobile deployment compiler (iOS/Android)
+  cubecl_bridge.ex    — GPU compute via ExCubecl (buffers, kernels, pipelines)
   model.ex            — Model definition, compilation, save/load
   training.ex         — Training loop (optimizers, LR schedules, callbacks)
 
@@ -148,7 +179,6 @@ native/ex_burn_nif/
 examples/
   linear_regression.exs  — Simplest ML workflow
   mnist_simple.exs        — Full deep learning pipeline
-  mobile_inference.exs    — iOS/Android deployment
 
 guides/
   01_getting_started.md   — Installation, basic ops, GPU check
@@ -184,7 +214,11 @@ raise ExBurn.Error,
 - [Nx](https://github.com/elixir-nx/nx) — Numerical Elixir
 - [Axon](https://github.com/elixir-nx/axon) — Neural network library
 - [CubeCL](https://github.com/tracel-ai/cubecl) — GPU compute language
-- [ExCubecl](https://github.com/ohhi-vn/ex_cubecl) — GPU runtime for Elixir
+- [ExCubecl](https://hex.pm/packages/ex_cubecl) v0.4+ — GPU compute runtime for Elixir (buffers, kernels, pipelines, media)
+
+---
+
+**Topics**: `elixir` · `machine-learning` · `burn` · `ios` · `android` · `nx` · `rustler` · `gpu` · `deep-learning`
 
 ## License
 

@@ -32,8 +32,6 @@ impl rustler::Resource for TensorResource {}
 impl RefUnwindSafe for TensorResource {}
 impl UnwindSafe for TensorResource {}
 
-rustler::init!("Elixir.ExBurn.Nif");
-
 // ═══════════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════════
@@ -586,3 +584,5 @@ fn nif_layer_norm_tensor(
 ) -> ResourceArc<TensorResource> {
     build_resource(a.tensor.clone(), a.shape.clone(), a.dtype.clone())
 }
+
+rustler::init!("Elixir.ExBurn.Nif");

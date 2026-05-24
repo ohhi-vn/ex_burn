@@ -30,13 +30,15 @@ defmodule ExBurn.MixProject do
   defp deps do
     [
       # Nx tensor computation
-      {:nx, "~> 0.7"},
+      {:nx, ">= 0.7.0 and < 2.0.0"},
       # Rust NIF integration
       {:rustler, "~> 0.37.0", runtime: false},
       # Neural network library
       {:axon, "~> 0.7", optional: true},
       # Classical ML algorithms
       {:scholar, "~> 0.4", optional: true},
+      # CubeCL GPU backend
+      {:ex_cubecl, ">= 0.4.0 and < 2.0.0", optional: true},
       # Documentation
       {:ex_doc, "~> 0.40", only: :dev, runtime: false}
     ]
@@ -67,7 +69,7 @@ defmodule ExBurn.MixProject do
         mix.lock
         README.md
         CHANGELOG.md
-        README.md
+        CONTRIBUTING.md
         LICENSE
       ),
       maintainers: ["Manh Vu"]
@@ -77,7 +79,16 @@ defmodule ExBurn.MixProject do
   defp docs do
     [
       main: "readme",
-      extras: ["README.md"]
+      extras: [
+        "README.md",
+        "guides/01_getting_started.md",
+        "guides/02_training.md",
+        "guides/03_mobile_deployment.md",
+        "guides/04_architecture.md"
+      ],
+      groups_for_extras: [
+        Guides: ~r/guides\//
+      ]
     ]
   end
 end

@@ -176,20 +176,6 @@ defmodule ExBurnTest do
     end
   end
 
-  describe "DalaML" do
-    test "returns compute config for iOS" do
-      config = ExBurn.DalaML.compute_config(:ios)
-      assert config.backend == :metal
-      assert config.preferred_precision == :f16
-    end
-
-    test "returns compute config for Android" do
-      config = ExBurn.DalaML.compute_config(:android)
-      assert config.backend == :vulkan
-      assert config.preferred_precision == :f16
-    end
-  end
-
   describe "CubeclBridge" do
     test "returns available backends" do
       backends = ExBurn.CubeclBridge.available_backends()

@@ -6,6 +6,24 @@ defmodule ExBurn.Backend do
   operations into calls to the Rust NIF layer which executes them using
   Burn's CubeCL backend for GPU acceleration.
 
+  ## Architecture
+
+  ```
+  Axon model
+     ↓
+  Nx.Defn graph
+     ↓
+  ExBurn.Backend (Nx.Backend behaviour)
+     ↓
+  ExBurn.Nif (Rustler NIF) ←→ ExCubecl (GPU buffers, kernels, pipelines)
+     ↓
+  Burn Autodiff<CubeCL> (Rust)
+     ↓
+  CubeCL kernels
+     ↓
+  Metal (iOS) / Vulkan (Android) / CUDA → GPU
+  ```
+
   ## Usage
 
       Nx.default_backend(ExBurn.Backend)

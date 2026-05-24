@@ -63,6 +63,47 @@ defmodule ExBurn.BurnBridge do
     %BT{ref: ref, shape: shape, type: type}
   end
 
+  @doc "Creates a GPU buffer via ExCubecl from a list of values."
+  @spec buffer(list(), [non_neg_integer()], atom()) :: ExCubecl.buffer_ref()
+  def buffer(data, shape, type \\ :f32) do
+    case ExCubecl.buffer(data, shape, type) do
+      {:ok, buf} -> buf
+      {:error, reason} -> raise Error, op: :buffer, reason: inspect(reason)
+    end
+  end
+
+  @doc "Creates a GPU buffer via ExCubecl, raising on error."
+  def buffer!(data, shape, type \\ :f32) do
+    ExCubecl.buffer!(data, shape, type)
+  end
+
+  @doc "Reads data from an ExCubecl buffer."
+  @spec read_buffer(ExCubecl.buffer_ref()) :: binary()
+  def read_buffer(buf) do
+    case ExCubecl.read(buf) do
+      {:ok, data} -> data
+      {:error, reason} -> raise Error, op: :read_buffer, reason: inspect(reason)
+    end
+  end
+
+  @doc "Returns the shape of an ExCubecl buffer."
+  @spec buffer_shape(ExCubecl.buffer_ref()) :: [non_neg_integer()]
+  def buffer_shape(buf) do
+    case ExCubecl.shape(buf) do
+      {:ok, shape} -> shape
+      {:error, reason} -> raise Error, op: :buffer_shape, reason: inspect(reason)
+    end
+  end
+
+  @doc "Returns the byte size of an ExCubecl buffer."
+  @spec buffer_size(ExCubecl.buffer_ref()) :: non_neg_integer()
+  def buffer_size(buf) do
+    case ExCubecl.size(buf) do
+      {:ok, size} -> size
+      {:error, reason} -> raise Error, op: :buffer_size, reason: inspect(reason)
+    end
+  end
+
   # ── Arithmetic ───────────────────────────────────────────────────
 
   @spec add(BT.t(), BT.t()) :: BT.t()
@@ -205,15 +246,42 @@ defmodule ExBurn.BurnBridge do
   # ── Device Management ────────────────────────────────────────────
 
   @spec to_gpu(BT.t()) :: BT.t()
-  def to_gpu(%BT{shape: shape, type: type} = bt) do
-    ref = ExBurn.Nif.nif_to_gpu(bt.ref)
-    %BT{ref: ref, shape: shape, type: type}
+  def to_gpu(%BT{ref: ref, shape: shape, type: type} = bt) do
+    # Read data from Burn tensor, create ExCubecl buffer, wrap back
+    case ExBurn.Nif.nif_tensor_to_binary(ref) do
+      binary ->
+        # Convert binary to flat list for ExCubecl
+        flat_data = for <<x::float-32 <- binary>>, do: x
+        nx_type = BT.burn_type_to_nx(type)
+
+        case ExCubecl.buffer(flat_data, shape, type) do
+          {:ok, buf} ->
+            # Return a Burn tensor that wraps the ExCubecl buffer reference
+            %BT{ref: buf, shape: shape, type: type}
+          {:error, _} ->
+            # Fallback: keep original
+            bt
+        end
+    end
   end
 
   @spec to_cpu(BT.t()) :: BT.t()
-  def to_cpu(%BT{shape: shape, type: type} = bt) do
-    ref = ExBurn.Nif.nif_to_cpu(bt.ref)
-    %BT{ref: ref, shape: shape, type: type}
+  def to_cpu(%BT{ref: ref, shape: shape, type: type}) do
+    # If ref is an ExCubecl buffer, read it back
+    try do
+      case ExCubecl.read(ref) do
+        {:ok, binary} ->
+          nx_type = BT.burn_type_to_nx(type)
+          tensor = Nx.from_binary(binary, nx_type) |> Nx.reshape(List.to_tuple(shape))
+          # Convert back to Burn tensor
+          from_nx(tensor)
+        {:error, _} ->
+          # Not an ExCubecl buffer, return as-is
+          %BT{ref: ref, shape: shape, type: type}
+      end
+    rescue
+      _ -> %BT{ref: ref, shape: shape, type: type}
+    end
   end
 
   # ── Memory ───────────────────────────────────────────────────────

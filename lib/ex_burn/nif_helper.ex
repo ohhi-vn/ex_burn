@@ -93,17 +93,32 @@ defmodule ExBurn.NifHelper do
 
   def gpu_available do
     try do
-      ExBurn.Nif.nif_gpu_available()
+      ExCubecl.available?()
     rescue
-      _ -> false
+      _ ->
+        # Fallback to NIF check if ExCubecl not available
+        try do
+          ExBurn.Nif.nif_gpu_available()
+        rescue
+          _ -> false
+        end
     end
   end
 
   def device_name do
     try do
-      ExBurn.Nif.nif_device_name()
+      case ExCubecl.device_info() do
+        %{device_name: name} -> to_string(name)
+        {:ok, %{device_name: name}} -> to_string(name)
+        _ -> "Unknown"
+      end
     rescue
-      _ -> "Unknown"
+      _ ->
+        try do
+          ExBurn.Nif.nif_device_name()
+        rescue
+          _ -> "Unknown"
+        end
     end
   end
 

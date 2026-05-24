@@ -10,6 +10,8 @@ defmodule ExBurn do
 
   ```
   Elixir/Axon → Nx.Defn → ExBurn.Backend → ExBurn.Nif (Rustler) → Burn/CubeCL → GPU
+                                                                    ↕
+                                                              ExCubecl (GPU buffers, kernels, pipelines)
   ```
 
   ## Quick Start
@@ -26,11 +28,11 @@ defmodule ExBurn do
   - `ExBurn.Backend` — Nx backend that delegates to Burn via NIF
   - `ExBurn.Nif`     — Rustler NIF stubs for Burn interop
   - `ExBurn.Tensor`  — Tensor conversion utilities between Nx and Burn formats
-  - `ExBurn.BurnBridge` — High-level bridge for Burn operations
-  - `ExBurn.DalaML`  — Dala ML compiler integration for mobile
-  - `ExBurn.CubeclBridge` — Bridge to ExCubecl for GPU execution
+  - `ExBurn.BurnBridge` — High-level bridge for Burn operations and ExCubecl buffers
+  - `ExBurn.CubeclBridge` — GPU compute via ExCubecl (buffers, kernels, pipelines)
   - `ExBurn.Model`   — Model definition and training orchestration
   - `ExBurn.Training` — Training loop implementation
+  - `ExBurn.Serving` — Nx.Serving integration for batched concurrent inference
   """
 
   @doc "Returns the current version of ExBurn."
