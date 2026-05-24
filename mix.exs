@@ -2,7 +2,7 @@ defmodule ExBurn.MixProject do
   use Mix.Project
 
   @app :ex_burn
-  @version "0.1.1"
+  @version "0.1.2"
   @github_url "https://github.com/ohhi-vn/ex_burn"
 
   def project do

@@ -1,3 +1,5 @@
+[workspace]
+
 [package]
 name = "ex_burn_nif"
 version = "0.1.0"
