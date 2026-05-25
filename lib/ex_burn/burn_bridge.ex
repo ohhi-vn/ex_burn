@@ -245,42 +245,85 @@ defmodule ExBurn.BurnBridge do
 
   # ── Device Management ────────────────────────────────────────────
 
+  @doc """
+  Checks whether a GPU (CUDA/Metal/Vulkan) is available via the NIF.
+  """
+  @spec gpu_available?() :: boolean()
+  def gpu_available? do
+    ExBurn.Nif.gpu_available()
+  end
+
+  @doc """
+  Returns the name of the active compute device.
+  """
+  @spec device_name() :: String.t()
+  def device_name do
+    ExBurn.Nif.device_name()
+  end
+
+  @doc """
+  Returns information about the current compute device.
+  """
+  @spec device_info() :: map()
+  def device_info do
+    %{
+      device: device_name(),
+      gpu_available: gpu_available?(),
+      backend: backend_name(),
+      available_backends: ExBurn.CubeclBridge.available_backends()
+    }
+  end
+
   @spec to_gpu(BT.t()) :: BT.t()
   def to_gpu(%BT{ref: ref, shape: shape, type: type} = bt) do
-    # Read data from Burn tensor, create ExCubecl buffer, wrap back
-    case ExBurn.Nif.tensor_to_binary(ref) do
-      binary ->
-        # Convert binary to flat list for ExCubecl
-        flat_data = for <<x::float-32 <- binary>>, do: x
-        _nx_type = BT.burn_type_to_nx(type)
-
-        case ExCubecl.buffer(flat_data, shape, type) do
-          {:ok, buf} ->
-            # Return a Burn tensor that wraps the ExCubecl buffer reference
-            %BT{ref: buf, shape: shape, type: type}
-          {:error, _} ->
-            # Fallback: keep original
-            bt
-        end
+    if gpu_available?() do
+      # With a GPU backend compiled in, the NIF already places tensors on the GPU.
+      # nif_to_gpu forces evaluation/synchronization and returns a new tensor ref.
+      try do
+        new_ref = ExBurn.Nif.to_gpu(ref)
+        %BT{ref: new_ref, shape: shape, type: type}
+      rescue
+        _ ->
+          # Fallback: try ExCubecl path
+          to_gpu_via_excubecl(bt, shape, type)
+      end
+    else
+      to_gpu_via_excubecl(bt, shape, type)
     end
   end
 
   @spec to_cpu(BT.t()) :: BT.t()
   def to_cpu(%BT{ref: ref, shape: shape, type: type}) do
-    # If ref is an ExCubecl buffer, read it back
     try do
-      case ExCubecl.read(ref) do
-        {:ok, binary} ->
-          nx_type = BT.burn_type_to_nx(type)
-          tensor = Nx.from_binary(binary, nx_type) |> Nx.reshape(List.to_tuple(shape))
-          # Convert back to Burn tensor
-          from_nx(tensor)
-        {:error, _} ->
-          # Not an ExCubecl buffer, return as-is
-          %BT{ref: ref, shape: shape, type: type}
-      end
+      new_ref = ExBurn.Nif.to_cpu(ref)
+      %BT{ref: new_ref, shape: shape, type: type}
     rescue
-      _ -> %BT{ref: ref, shape: shape, type: type}
+      _ ->
+        %BT{ref: ref, shape: shape, type: type}
+    end
+  end
+
+  # ── GPU via ExCubecl fallback ────────────────────────────────────
+
+  defp to_gpu_via_excubecl(bt, shape, type) do
+    case ExBurn.Nif.tensor_to_binary(bt.ref) do
+      binary ->
+        flat_data = for <<x::float-32 <- binary>>, do: x
+
+        case ExCubecl.buffer(flat_data, shape, type) do
+          {:ok, buf} -> %BT{ref: buf, shape: shape, type: type}
+          {:error, _} -> bt
+        end
+    end
+  end
+
+  defp backend_name do
+    name = device_name()
+    cond do
+      String.contains?(name, "CUDA") -> :cuda
+      String.contains?(name, "Metal") -> :metal
+      String.contains?(name, "Vulkan") -> :vulkan
+      true -> :cpu
     end
   end
 

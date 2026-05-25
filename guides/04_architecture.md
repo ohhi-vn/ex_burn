@@ -6,7 +6,10 @@
 ┌─────────────────────────────────────────────────────────────┐
 │                     Elixir / BEAM VM                        │
 │                                                             │
-│  Axon model ──→ Nx.Defn graph ──→ ExBurn.Backend            │
+│  Axon model ──→ Nx.Defn graph ──→ ExBurn.Defn.Compiler      │
+│                                         │                   │
+│                                         ↓                   │
+│                              ExBurn.Backend                 │
 │                                         │                   │
 │                                         ↓                   │
 │                              ExBurn.Nif (Rustler)           │
@@ -35,6 +38,39 @@
 │                                                             │
 │  Metal (iOS/macOS)  │  Vulkan (Android/Linux)  │  CUDA     │
 └─────────────────────────────────────────────────────────────┘
+```
+
+## Nx Defn Compiler
+
+`ExBurn.Defn.Compiler` implements the `Nx.Defn.Compiler` behaviour, which is the
+entry point for `defn`-based computation. When you call a `defn` function:
+
+1. `Nx.Defn` traces the function body into an expression tree of `Nx.Defn.Expr` nodes
+2. The compiler's `__jit__/5` or `__compile__/4` callback receives the tree
+3. Each node is evaluated recursively: parameters become Burn tensors, operations
+   are dispatched to `ExBurn.Backend`, and results flow back as `Nx.Tensor`
+
+```elixir
+defn add_and_scale(x, y, scale) do
+  Nx.add(x, y) |> Nx.multiply(scale)
+end
+#  ↓ traced to expression tree
+#  ↓ ExBurn.Defn.Compiler evaluates each node
+#  ↓ ExBurn.Backend.add/3, ExBurn.Backend.multiply/3 (NIF calls)
+#  ↓ result returned as Nx.Tensor
+```
+
+Configure the compiler globally or per-function:
+
+```elixir
+# Global default
+Nx.Defn.global_default_options(compiler: ExBurn.Defn.Compiler)
+
+# Per-function
+defn my_fun(x, opts \\ []) do
+  Nx.sin(x)
+end
+compiler: ExBurn.Defn.Compiler
 ```
 
 ## Nx Backend Protocol

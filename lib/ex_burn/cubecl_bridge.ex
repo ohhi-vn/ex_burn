@@ -448,18 +448,31 @@ defmodule ExBurn.CubeclBridge do
   Returns a list of available GPU backends on this system.
 
   Delegates to ExCubecl availability checks and platform detection.
+  On Linux/Windows with NVIDIA hardware, `:cuda` is included.
+  On macOS, `:metal` is included.
   """
   @spec available_backends() :: [backend()]
   def available_backends do
     if not ExCubecl.available?() do
       []
     else
-      cond do
-        macos?() -> [:metal]
-        linux?() -> [:vulkan, :cuda]
-        true -> []
-      end
+      backends = []
+      backends = backends ++ if cuda_detected?(), do: [:cuda], else: []
+      backends = backends ++ if metal_detected?(), do: [:metal], else: []
+      backends = backends ++ if vulkan_detected?(), do: [:vulkan], else: []
+      backends
     end
+  end
+
+  @doc """
+  Checks whether an NVIDIA CUDA GPU is available on this system.
+
+  First checks via ExCubecl if available, then falls back to
+  platform-specific heuristics (nvidia-smi on Linux/Windows).
+  """
+  @spec cuda_available?() :: boolean()
+  def cuda_available? do
+    cuda_detected?()
   end
 
   # ── Private Helpers ──────────────────────────────────────────────
@@ -469,4 +482,47 @@ defmodule ExBurn.CubeclBridge do
 
   defp linux?,
     do: :erlang.system_info(:system_architecture) |> to_string() |> String.contains?("linux")
+
+  defp cuda_detected? do
+    # Check via ExCubecl first
+    case ExCubecl.available?() do
+      true ->
+        # Try to get device info; if it reports CUDA, we're good
+        case ExCubecl.device_info() do
+          {:ok, %{backend: "cuda"}} -> true
+          {:ok, %{backend: :cuda}} -> true
+          _ -> cuda_fallback_check()
+        end
+      _ ->
+        cuda_fallback_check()
+    end
+  rescue
+    _ -> cuda_fallback_check()
+  end
+
+  defp cuda_fallback_check do
+    # Fallback: check for nvidia-smi on Linux/Windows
+    case :os.type() do
+      {:unix, :linux} -> has_nvidia_smi?()
+      {:win32, _} -> has_nvidia_smi?()
+      _ -> false
+    end
+  end
+
+  defp has_nvidia_smi? do
+    case System.cmd("nvidia-smi", [], stderr_to_stdout: true) do
+      {_, 0} -> true
+      _ -> false
+    end
+  rescue
+    _ -> false
+  end
+
+  defp metal_detected? do
+    macos?() and ExCubecl.available?()
+  end
+
+  defp vulkan_detected? do
+    (linux?() or match?({:win32, _}, :os.type())) and ExCubecl.available?()
+  end
 end

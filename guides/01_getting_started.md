@@ -43,6 +43,46 @@ m = Nx.tensor([[1.0, 2.0], [3.0, 4.0]])
 Nx.transpose(m)     # [[1.0, 3.0], [2.0, 4.0]]
 ```
 
+## Using defn with the ExBurn Compiler
+
+The `ExBurn.Defn.Compiler` module implements the `Nx.Defn.Compiler` behaviour,
+allowing you to write GPU-accelerated numerical functions with `defn`:
+
+```elixir
+# Set ExBurn as the backend and compiler
+Nx.default_backend(ExBurn.Backend)
+Nx.Defn.global_default_options(compiler: ExBurn.Defn.Compiler)
+
+defmodule MyMath do
+  import Nx.Defn
+
+  defn add_and_scale(x, y, scale) do
+    x
+    |> Nx.add(y)
+    |> Nx.multiply(scale)
+  end
+
+  defn dot_product(a, b) do
+    a
+    |> Nx.multiply(b)
+    |> Nx.sum()
+  end
+end
+
+# These run on GPU via Burn
+MyMath.add_and_scale(Nx.tensor([1.0, 2.0]), Nx.tensor([3.0, 4.0]), Nx.tensor(2.0))
+#=> #Nx.Tensor<[8.0, 12.0]>
+```
+
+You can also configure the compiler per-function:
+
+```elixir
+defn my_fun(x, opts \\ []) do
+  Nx.sin(x)
+end
+compiler: ExBurn.Defn.Compiler
+```
+
 ## Using the BurnBridge Directly
 
 For performance-critical code, bypass the Nx layer:

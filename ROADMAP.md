@@ -2,6 +2,7 @@
 
 ## v0.1.0 (Current — Early Alpha)
 - Nx.Backend behaviour (basic ops, shape ops, reductions, linear algebra)
+- Nx.Defn.Compiler — GPU-accelerated defn expression evaluation
 - Rust NIF bridge to Burn/CubeCL
 - Training loop with numerical gradients
 - Nx.Serving integration

@@ -12,11 +12,17 @@ license = "MIT"
 name = "ex_burn_nif"
 crate-type = ["cdylib"]
 
+[features]
+default = ["cuda"]
+cuda = ["burn/cuda"]
+metal = ["burn/metal"]
+vulkan = ["burn/vulkan"]
+
 [dependencies]
 rustler = "=0.37.4"
 
-# Burn deep learning framework with CubeCL backend
-burn = { version = "=0.21.0", features = ["cubecl"] }
+# Burn deep learning framework
+burn = { version = "=0.21.0", features = ["cubecl"], default-features = false }
 burn-cubecl = "=0.21.0"
 burn-autodiff = "=0.21.0"
 burn-tensor = "=0.21.0"

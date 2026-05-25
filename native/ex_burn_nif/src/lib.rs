@@ -1,17 +1,149 @@
 //! # ExBurn NIF
+//!
+//! Rust NIF bridge between Elixir and the Burn deep learning framework.
+//! Supports multiple backends:
+//!   - **CUDA** (NVIDIA GPUs) — via `burn/cuda` feature
+//!   - **Metal** (Apple GPUs) — via `burn/metal` feature
+//!   - **Vulkan** (Android/Linux/Windows) — via `burn/vulkan` feature
+//!   - **NdArray** (CPU fallback) — always available
+//!
+//! The backend is selected at compile time via Cargo features on the `burn` crate.
+//! The default feature is `cuda`.  Build with `--features metal` or
+//! `--features vulkan` to target other GPUs, or `--no-default-features`
+//! for CPU-only (NdArray).
 
 use rustler::ResourceArc;
 use std::panic::{RefUnwindSafe, UnwindSafe};
+use std::sync::OnceLock;
 
 use burn::tensor::Tensor;
 use burn_autodiff::Autodiff;
+#[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
 use burn_ndarray::NdArray;
 
+// ── Backend selection ─────────────────────────────────────────────
+//
+// The active GPU backend is chosen at compile time via Cargo features.
+// Each feature gate brings in the corresponding Burn backend and device
+// types.  When no GPU feature is enabled we fall back to NdArray (CPU).
+
+/// The concrete backend type used throughout this NIF.
+///
+/// With the `cuda` feature this is a CUDA GPU backend.
+/// With `metal` it is a Metal GPU backend.
+/// With `vulkan` it is a Vulkan GPU backend.
+/// With no GPU feature it falls back to NdArray (CPU).
+#[cfg(feature = "cuda")]
+type GpuBackend = burn::backend::Cuda;
+
+#[cfg(feature = "metal")]
+type GpuBackend = burn::backend::Metal;
+
+#[cfg(feature = "vulkan")]
+type GpuBackend = burn::backend::Vulkan;
+
+#[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+type GpuBackend = NdArray;
+
+/// Autodiff wrapper around the GPU backend.
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+type B = Autodiff<GpuBackend>;
+
+/// Autodiff wrapper around NdArray (CPU fallback).
+#[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
 type B = Autodiff<NdArray>;
 
-fn device() -> burn_ndarray::NdArrayDevice {
-    burn_ndarray::NdArrayDevice::default()
+// ── Device ────────────────────────────────────────────────────────
+// The `BackendDevice` trait abstracts over the concrete device type
+// for each backend.  Each backend cfg provides its own impl so the
+// rest of the code can call `device()` uniformly.
+
+/// Trait to obtain the default device for the active backend.
+trait BackendDevice {
+    type Device;
+    fn device() -> Self::Device;
 }
+
+#[cfg(feature = "cuda")]
+impl BackendDevice for GpuBackend {
+    type Device = burn::backend::cuda::CudaDevice;
+    fn device() -> Self::Device {
+        burn::backend::cuda::CudaDevice::default()
+    }
+}
+
+#[cfg(feature = "metal")]
+impl BackendDevice for GpuBackend {
+    type Device = burn::backend::metal::MetalDevice;
+    fn device() -> Self::Device {
+        burn::backend::metal::MetalDevice::default()
+    }
+}
+
+#[cfg(feature = "vulkan")]
+impl BackendDevice for GpuBackend {
+    type Device = burn::backend::vulkan::VulkanDevice;
+    fn device() -> Self::Device {
+        burn::backend::vulkan::VulkanDevice::default()
+    }
+}
+
+#[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+impl BackendDevice for NdArray {
+    type Device = burn_ndarray::NdArrayDevice;
+    fn device() -> Self::Device {
+        burn_ndarray::NdArrayDevice::default()
+    }
+}
+
+/// Returns the default device for the compiled backend.
+fn device() -> <GpuBackend as BackendDevice>::Device {
+    <GpuBackend as BackendDevice>::device()
+}
+
+// ── GPU availability cache ────────────────────────────────────────
+
+static GPU_AVAILABLE: OnceLock<bool> = OnceLock::new();
+
+fn gpu_available_cached() -> bool {
+    *GPU_AVAILABLE.get_or_init(|| probe_gpu_available())
+}
+
+fn probe_gpu_available() -> bool {
+    #[cfg(feature = "cuda")]
+    {
+        use burn::backend::cuda::CudaDevice;
+        // Attempt to create a tiny tensor on the CUDA device.
+        // If this succeeds, CUDA is available.
+        let dev = CudaDevice::default();
+        let t: Tensor<Autodiff<burn::backend::Cuda>, 1> = Tensor::from_floats([0.0f32], &dev);
+        // Force evaluation by reading the data
+        let _ = t.to_data();
+        return true;
+    }
+    #[cfg(feature = "metal")]
+    {
+        use burn::backend::metal::MetalDevice;
+        let dev = MetalDevice::default();
+        let t: Tensor<Autodiff<burn::backend::Metal>, 1> = Tensor::from_floats([0.0f32], &dev);
+        let _ = t.to_data();
+        return true;
+    }
+    #[cfg(feature = "vulkan")]
+    {
+        use burn::backend::vulkan::VulkanDevice;
+        let dev = VulkanDevice::default();
+        let t: Tensor<Autodiff<burn::backend::Vulkan>, 1> = Tensor::from_floats([0.0f32], &dev);
+        let _ = t.to_data();
+        return true;
+    }
+    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+    {
+        false
+    }
+}
+
+// ── Tensor enum ───────────────────────────────────────────────────
 
 #[derive(Clone)]
 pub enum BurnTensor {
@@ -31,6 +163,8 @@ pub struct TensorResource {
 impl rustler::Resource for TensorResource {}
 impl RefUnwindSafe for TensorResource {}
 impl UnwindSafe for TensorResource {}
+
+// ── Helpers ───────────────────────────────────────────────────────
 
 fn tensor_to_bytes(t: &BurnTensor) -> (Vec<usize>, String, Vec<u8>) {
     match t {
@@ -93,6 +227,12 @@ fn build_resource(t: BurnTensor, shape: Vec<usize>, dtype: String) -> ResourceAr
     })
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// NIF Functions
+// ═══════════════════════════════════════════════════════════════════
+
+// ── Tensor Creation ───────────────────────────────────────────────
+
 #[inline(never)]
 #[rustler::nif]
 fn nif_new_tensor(data: Vec<u8>, shape: Vec<usize>, dtype: String) -> ResourceArc<TensorResource> {
@@ -152,6 +292,8 @@ fn nif_iota_tensor(shape: Vec<usize>, axis: usize, _type: String) -> ResourceArc
     build_resource(BurnTensor::F32x1(t), vec![n], "f32".into())
 }
 
+// ── Tensor Inspection ─────────────────────────────────────────────
+
 #[inline(never)]
 #[rustler::nif]
 fn nif_tensor_shape(tensor: ResourceArc<TensorResource>) -> Vec<usize> {
@@ -176,6 +318,8 @@ fn nif_tensor_to_binary(tensor: ResourceArc<TensorResource>) -> Vec<u8> {
 fn nif_tensor_numel(tensor: ResourceArc<TensorResource>) -> usize {
     tensor.shape.iter().product()
 }
+
+// ── Element-wise Arithmetic ───────────────────────────────────────
 
 #[inline(never)]
 #[rustler::nif]
@@ -349,6 +493,8 @@ fn nif_relu_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource
     build_resource(result, shape, dtype)
 }
 
+// ── Reductions ────────────────────────────────────────────────────
+
 #[inline(never)]
 #[rustler::nif]
 fn nif_sum_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
@@ -394,6 +540,8 @@ fn nif_min_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource>
     build_resource(result, shape, dtype)
 }
 
+// ── Linear Algebra ────────────────────────────────────────────────
+
 #[inline(never)]
 #[rustler::nif]
 fn nif_matmul_tensor(
@@ -436,6 +584,8 @@ fn nif_dot_tensor(
     let (shape, dtype, _) = tensor_to_bytes(&result);
     build_resource(result, shape, dtype)
 }
+
+// ── Shape Manipulation ────────────────────────────────────────────
 
 #[inline(never)]
 #[rustler::nif]
@@ -503,43 +653,67 @@ fn nif_concat_tensor(
     build_resource(result, shape, dtype)
 }
 
+// ── Device Management ─────────────────────────────────────────────
+
 #[inline(never)]
 #[rustler::nif]
 fn nif_gpu_available() -> bool {
-    false
+    gpu_available_cached()
 }
 
 #[inline(never)]
 #[rustler::nif]
 fn nif_device_name() -> String {
-    "NdArray (CPU)".into()
+    if gpu_available_cached() {
+        #[cfg(feature = "cuda")]
+        return "CUDA (NVIDIA GPU)".into();
+        #[cfg(feature = "metal")]
+        return "Metal (Apple GPU)".into();
+        #[cfg(feature = "vulkan")]
+        return "Vulkan (GPU)".into();
+        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+        return "NdArray (CPU)".into();
+    } else {
+        "NdArray (CPU)".into()
+    }
 }
 
 #[inline(never)]
 #[rustler::nif]
 fn nif_to_gpu(tensor: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
-    build_resource(
-        tensor.tensor.clone(),
-        tensor.shape.clone(),
-        tensor.dtype.clone(),
-    )
+    // With a GPU backend compiled in, tensors are already on the GPU device.
+    // This function is a no-op when the backend is GPU, but still forces
+    // evaluation (synchronization) so the data is materialized.
+    let (_, _, bytes) = tensor_to_bytes(&tensor.tensor);
+    let t = make_tensor_from_bytes(bytes, tensor.shape.clone(), tensor.dtype.clone());
+    build_resource(t, tensor.shape.clone(), tensor.dtype.clone())
 }
 
 #[inline(never)]
 #[rustler::nif]
 fn nif_to_cpu(tensor: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
-    build_resource(
-        tensor.tensor.clone(),
-        tensor.shape.clone(),
-        tensor.dtype.clone(),
-    )
+    // Materialize the tensor data (forces GPU→CPU transfer if on GPU),
+    // then rebuild on the CPU device.
+    let (_, _, bytes) = tensor_to_bytes(&tensor.tensor);
+
+    let t = {
+        // Read data back to host, then rebuild using the B backend device
+        // (which may be GPU or CPU depending on compilation).
+        make_tensor_from_bytes(bytes, tensor.shape.clone(), tensor.dtype.clone())
+    };
+
+    build_resource(t, tensor.shape.clone(), tensor.dtype.clone())
 }
+
+// ── Memory Management ─────────────────────────────────────────────
 
 #[inline(never)]
 #[rustler::nif]
 fn nif_free_tensor(_tensor: ResourceArc<TensorResource>) -> rustler::Atom {
     rustler::types::atom::ok()
 }
+
+// ── Neural Network Operations ─────────────────────────────────────
 
 #[inline(never)]
 #[rustler::nif]
@@ -579,6 +753,10 @@ fn nif_layer_norm_tensor(
 ) -> ResourceArc<TensorResource> {
     build_resource(a.tensor.clone(), a.shape.clone(), a.dtype.clone())
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// NIF init
+// ═══════════════════════════════════════════════════════════════════
 
 rustler::init!("Elixir.ExBurn.Nif");
 

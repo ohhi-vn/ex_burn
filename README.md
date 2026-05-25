@@ -16,6 +16,8 @@ Axon model
    ↓
 Nx.Defn graph
    ↓
+ExBurn.Defn.Compiler (Nx.Defn.Compiler behaviour)
+   ↓
 ExBurn.Backend (Nx.Backend behaviour)
    ↓
 ExBurn.Nif (Rustler NIF) ←→ ExCubecl (GPU buffers, kernels, pipelines)
@@ -37,13 +39,13 @@ Metal (iOS) / Vulkan (Android) / CUDA → GPU
 | Nx.Backend behaviour (shape ops) | ✅ Implemented |
 | Nx.Backend behaviour (reductions) | ✅ Implemented |
 | Nx.Backend behaviour (linear algebra) | ✅ Implemented |
+| Nx.Defn.Compiler | ✅ Implemented |
 | Rust NIF bridge (Burn CubeCL) | ✅ Implemented |
 | GPU acceleration (Metal/Vulkan) | ✅ Via Burn/CubeCL |
 | Axon model compilation | 🔄 Basic support |
 | Training loop (SGD/Adam/RMSprop) | 🔄 Basic support |
 | Nx.Serving | ✅ Implemented |
-| Nx.Defn.Compiler | 🚧 Planned |
-| CUDA backend | 🚧 Planned |
+| CUDA backend | ✅ Implemented |
 | Precompiled NIF binaries | 🚧 Planned |
 
 > ⚠️ **Note**: The Quick Start examples show the target API. Some features
@@ -53,7 +55,8 @@ Metal (iOS) / Vulkan (Android) / CUDA → GPU
 ## Features
 
 - **Nx Backend**: Full `Nx.Backend` behaviour implementation — drop-in replacement for `Nx.BinaryBackend`
-- **GPU Acceleration**: Burn's CubeCL backend with Metal (Apple), Vulkan (Android), CUDA (NVIDIA)
+- **Nx Defn Compiler**: Custom `Nx.Defn.Compiler` that executes defn expressions on the Burn GPU backend
+- **GPU Acceleration**: Burn's CubeCL backend with CUDA (NVIDIA), Metal (Apple), Vulkan (Android)
 - **ExCubecl Integration**: GPU buffer management, kernel execution, async commands, and pipeline orchestration via [ExCubecl](https://hex.pm/packages/ex_cubecl)
 - **Autodiff**: Automatic differentiation via Burn's `Autodiff` backend decorator
 - **Training Loop**: Complete training with Adam, SGD, RMSprop optimizers, LR scheduling, gradient clipping, callbacks
@@ -72,6 +75,23 @@ Nx.default_backend(ExBurn.Backend)
 # Create and manipulate tensors
 t = Nx.tensor([1.0, 2.0, 3.0])
 Nx.add(t, t) |> Nx.to_list()
+
+# Use defn with the ExBurn compiler for GPU-accelerated computation
+Nx.Defn.global_default_options(compiler: ExBurn.Defn.Compiler)
+
+defmodule MyMath do
+  import Nx.Defn
+
+  defn add_and_scale(x, y, scale) do
+    x
+    |> Nx.add(y)
+    |> Nx.multiply(scale)
+  end
+end
+
+# Runs on GPU via Burn
+result = MyMath.add_and_scale(Nx.tensor([1.0, 2.0]), Nx.tensor([3.0, 4.0]), Nx.tensor(2.0))
+Nx.to_list(result) # [8.0, 12.0]
 
 # Define a model with Axon
 model =
@@ -160,6 +180,7 @@ mix run examples/gpu_inference.exs
 ```
 lib/ex_burn/
   ex_burn.ex          — Main API (version, configure!, default_device)
+  defn_compiler.ex    — Nx.Defn.Compiler for GPU-accelerated defn
   backend.ex          — Nx.Backend implementation (delegates to Burn via NIF)
   nif.ex              — Rustler NIF stubs (40+ functions)
   tensor.ex           — Nx ↔ Burn tensor conversion utilities
@@ -188,11 +209,40 @@ guides/
 
 | Platform | Backend | Status |
 |----------|---------|--------|
+| NVIDIA   | CUDA    | ✅     |
 | iOS      | Metal   | ✅     |
 | Android  | Vulkan  | ✅     |
 | macOS    | Metal   | ✅     |
 | Linux    | Vulkan  | ✅     |
-| NVIDIA   | CUDA    | 🔜     |
+
+### CUDA Support
+
+ExBurn compiles with CUDA support by default (`burn/cuda` + `burn-cubecl/cuda` features).
+On systems without an NVIDIA GPU, the NIF automatically falls back to the NdArray (CPU) backend.
+
+To build with a specific GPU backend:
+
+```bash
+# CUDA (default)
+mix compile
+
+# Metal (macOS/iOS)
+cd native/ex_burn_nif && cargo build --features metal --no-default-features
+
+# Vulkan (Android/Linux)
+cd native/ex_burn_nif && cargo build --features vulkan --no-default-features
+
+# CPU-only (no GPU)
+cd native/ex_burn_nif && cargo build --no-default-features
+```
+
+Check CUDA availability from Elixir:
+
+```elixir
+ExBurn.cuda_available?()   # true if NVIDIA GPU detected
+ExBurn.device_name()       # "CUDA (NVIDIA GPU)" or "NdArray (CPU)"
+ExBurn.device_info()       # full device info map
+```
 
 ## Error Handling
 
