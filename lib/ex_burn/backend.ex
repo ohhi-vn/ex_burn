@@ -51,6 +51,8 @@ defmodule ExBurn.Backend do
 
   defstruct [:ref, :shape, :type]
 
+  @dialyzer {:nowarn_function, block: 4}
+
   # ── Allocation ───────────────────────────────────────────────────
 
   @impl true
@@ -102,6 +104,16 @@ defmodule ExBurn.Backend do
 
   @spec tensor_type(t()) :: Nx.Type.t()
   def tensor_type(%__MODULE__{type: type}), do: burn_to_nx_type(type)
+
+  @doc "Returns the total number of elements in the backend tensor."
+  @spec parameter_count(t()) :: non_neg_integer()
+  def parameter_count(%__MODULE__{shape: shape}), do: Enum.product(shape)
+
+  @doc "Returns a human-readable string representation of the tensor."
+  @spec describe(t()) :: String.t()
+  def describe(%__MODULE__{shape: shape, type: type}) do
+    "ExBurn.Tensor<shape: #{inspect(shape)}, type: #{type}, elements: #{Enum.product(shape)}>"
+  end
 
   # ── Element-wise Arithmetic ──────────────────────────────────────
 
@@ -1229,7 +1241,8 @@ defmodule ExBurn.Backend do
     mean = opts[:mean] || 0.0
     std = opts[:std] || 1.0
 
-    with {:ok, ref} <- ExBurn.NifHelper.random_tensor(shape, "f32", mean - 2 * std, mean + 2 * std),
+    with {:ok, ref} <-
+           ExBurn.NifHelper.random_tensor(shape, "f32", mean - 2 * std, mean + 2 * std),
          {:ok, shape} <- Nif.tensor_shape(ref) do
       %__MODULE__{ref: ref, shape: shape, type: :f32}
     else
@@ -1480,12 +1493,28 @@ defmodule ExBurn.Backend do
 
   @impl true
   @spec inspect(t(), keyword()) :: Inspect.Algebra.t() | String.t()
-  def inspect(%__MODULE__{} = tensor, _inspect_opts) do
+  def inspect(%__MODULE__{} = tensor, inspect_opts) do
+    limit = inspect_opts[:limit] || 5
+
+    preview =
+      if Enum.product(tensor.shape) <= limit do
+        case to_nx(tensor) do
+          {:ok, nx_tensor} ->
+            values = Nx.to_flat_list(nx_tensor) |> Enum.take(limit)
+            " data: #{inspect(values)}"
+
+          {:error, _} ->
+            ""
+        end
+      else
+        ""
+      end
+
     Inspect.Algebra.concat(
       Inspect.Algebra.color("#ExBurn.Tensor<", :map, Inspect.Opts.new(limit: :infinity)),
       Inspect.Algebra.concat(
         Inspect.Algebra.color(
-          "shape: #{inspect(tensor.shape)}, type: #{tensor.type}",
+          "shape: #{inspect(tensor.shape)}, type: #{tensor.type}#{preview}",
           :map,
           Inspect.Opts.new(limit: :infinity)
         ),
@@ -1515,6 +1544,17 @@ defmodule ExBurn.Backend do
   end
 
   # ── Private Helpers ──────────────────────────────────────────────
+
+  @spec apply_reduce_fun(t()) :: t()
+  defp apply_reduce_fun(%__MODULE__{} = tensor) do
+    # Default reduction: sum over all axes
+    with {:ok, ref} <- Nif.sum_tensor(tensor.ref),
+         {:ok, shape} <- Nif.tensor_shape(ref) do
+      %__MODULE__{ref: ref, shape: shape, type: :f32}
+    else
+      {:error, _} -> tensor
+    end
+  end
 
   @spec nx_to_burn_type(Nx.Type.t()) :: atom()
   defp nx_to_burn_type({:f, 32}), do: :f32
@@ -1601,16 +1641,5 @@ defmodule ExBurn.Backend do
   defp expand_shape(shape, axis) do
     {list_before, list_after} = Enum.split(shape, axis)
     list_before ++ [1] ++ list_after
-  end
-
-  @spec apply_reduce_fun(t()) :: t()
-  defp apply_reduce_fun(%__MODULE__{} = tensor) do
-    # Default reduction: sum over all axes
-    with {:ok, ref} <- Nif.sum_tensor(tensor.ref),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
-    else
-      {:error, _} -> tensor
-    end
   end
 end

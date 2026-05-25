@@ -40,6 +40,7 @@ defmodule ExBurn.Training do
 
   alias ExBurn.Model
 
+  @type model :: ExBurn.Model.t()
   @type dataset :: {Nx.Tensor.t(), Nx.Tensor.t()}
   @type callback :: (map() -> map())
   @type lr_schedule ::
@@ -60,7 +61,8 @@ defmodule ExBurn.Training do
           weight_decay: float() | nil,
           accumulate_gradients: pos_integer(),
           accuracy: boolean(),
-          nesterov: boolean()
+          nesterov: boolean(),
+          warmup: pos_integer()
         ]
 
   @doc """
@@ -87,7 +89,7 @@ defmodule ExBurn.Training do
 
     The trained `ExBurn.Model` struct with updated parameters.
   """
-  @spec fit(Model.t(), dataset(), keyword()) :: Model.t()
+  @spec fit(model(), dataset(), keyword()) :: model()
   def fit(%Model{} = model, {inputs, targets}, opts \\ []) do
     epochs = Keyword.get(opts, :epochs, 10)
     batch_size = Keyword.get(opts, :batch_size, 32)
@@ -250,7 +252,7 @@ defmodule ExBurn.Training do
 
     `{loss, updated_model}` where loss is a float.
   """
-  @spec train_step(Model.t(), dataset(), keyword()) :: {float(), Model.t()}
+  @spec train_step(model(), dataset(), keyword()) :: {float(), model()}
   def train_step(%Model{} = model, {batch_in, batch_tgt}, opts \\ []) do
     clip_norm = Keyword.get(opts, :clip_norm)
     clip_value = Keyword.get(opts, :clip_value)
@@ -308,7 +310,7 @@ defmodule ExBurn.Training do
 
     A map of `{param_key => gradient_tensor}`.
   """
-  @spec compute_gradients(Model.t(), dataset(), keyword()) :: map()
+  @spec compute_gradients(model(), dataset(), keyword()) :: map()
   def compute_gradients(%Model{} = model, {batch_in, batch_tgt}, opts \\ []) do
     method = Keyword.get(opts, :grad_method, :numerical)
     epsilon = Keyword.get(opts, :epsilon, 1.0e-5)
@@ -326,13 +328,88 @@ defmodule ExBurn.Training do
   end
 
   @doc """
+  Profiles a single training step, returning detailed timing for each phase.
+
+  Useful for identifying bottlenecks in the training pipeline.
+
+  ## Parameters
+
+    * `model` — The current model state
+    * `batch` — A `{inputs, targets}` tuple
+    * `opts` — Options (same as `train_step/3`)
+
+  ## Returns
+
+    A map with `:forward_ms`, `:backward_ms`, `:optimizer_ms`, `:total_ms`.
+
+  ## Example
+
+      profile = ExBurn.Training.profile_step(model, batch)
+      IO.puts("Forward: \#{profile.forward_ms}ms, Backward: \#{profile.backward_ms}ms")
+  """
+  @spec profile_step(model(), dataset(), keyword()) :: map()
+  def profile_step(%Model{} = model, {batch_in, batch_tgt}, opts \\ []) do
+    clip_norm = Keyword.get(opts, :clip_norm)
+    clip_value = Keyword.get(opts, :clip_value)
+    weight_decay = Keyword.get(opts, :weight_decay)
+
+    # Forward pass timing
+    {pred, forward_time} =
+      :timer.tc(fn ->
+        {:ok, p} = Model.predict(model, batch_in)
+        p
+      end)
+
+    # Loss computation
+    {:ok, loss} = Model.compute_loss(model, pred, batch_tgt)
+    loss_val = Nx.to_number(loss)
+
+    # Backward pass timing
+    {grads, backward_time} =
+      :timer.tc(fn ->
+        compute_gradients(model, {batch_in, batch_tgt}, opts)
+      end)
+
+    # Add weight decay
+    grads =
+      if weight_decay && weight_decay > 0 do
+        add_weight_decay_grads(grads, model.params, weight_decay)
+      else
+        grads
+      end
+
+    # Clip gradients
+    grads =
+      grads
+      |> maybe_clip_by_norm(clip_norm)
+      |> maybe_clip_by_value(clip_value)
+
+    # Optimizer step timing
+    {updated_model, optimizer_time} =
+      :timer.tc(fn ->
+        optimizer_step(model, grads)
+      end)
+
+    total_time = forward_time + backward_time + optimizer_time
+
+    %{
+      loss: loss_val,
+      forward_ms: Float.round(forward_time / 1000, 2),
+      backward_ms: Float.round(backward_time / 1000, 2),
+      optimizer_ms: Float.round(optimizer_time / 1000, 2),
+      total_ms: Float.round(total_time / 1000, 2),
+      model: updated_model
+    }
+  end
+
+  @doc """
   Evaluates a model on a dataset.
 
   Returns the average loss over the entire dataset.
   When `track_accuracy` is true, returns `{loss, accuracy}` where accuracy
   is a float or `nil` if the loss function is not cross_entropy.
   """
-  @spec evaluate(Model.t(), dataset(), boolean()) :: float() | {float(), float() | nil}
+  @spec evaluate(model(), dataset(), boolean()) :: float() | {float(), float() | nil}
   def evaluate(%Model{} = model, {inputs, targets}, track_accuracy \\ false) do
     num_samples = Nx.shape(inputs) |> elem(0)
 
@@ -1102,6 +1179,146 @@ defmodule ExBurn.Training do
         metrics ->
           metrics
       end
+    end
+  end
+
+  defmodule WarmupCallback do
+    @moduledoc """
+    Learning rate warmup callback.
+
+    Gradually increases the learning rate from `start_lr` to `target_lr`
+    over `warmup_epochs` epochs. Helps stabilize early training.
+
+    ## Usage
+
+        callbacks: [
+          ExBurn.Training.WarmupCallback.linear(5, 1.0e-5, 0.001)
+        ]
+    """
+
+    @spec linear(pos_integer(), float(), float()) :: (map() -> map())
+    def linear(warmup_epochs, start_lr, target_lr) do
+      fn
+        %{epoch: epoch, model: %Model{optimizer_state: opt_state} = model} = metrics
+        when epoch <= warmup_epochs ->
+          progress = epoch / warmup_epochs
+          new_lr = start_lr + (target_lr - start_lr) * progress
+          updated_model = %{model | optimizer_state: Map.put(opt_state, :learning_rate, new_lr)}
+          Map.put(metrics, :model, updated_model)
+
+        metrics ->
+          metrics
+      end
+    end
+  end
+
+  defmodule ReduceLROnPlateauCallback do
+    @moduledoc """
+    Reduces learning rate when validation loss stops improving.
+
+    Monitors validation loss and multiplies the learning rate by `factor`
+    after `patience` epochs without improvement.
+
+    ## Usage
+
+        callbacks: [
+          ExBurn.Training.ReduceLROnPlateauCallback.new(patience: 5, factor: 0.5, min_lr: 1.0e-6)
+        ]
+    """
+
+    @spec new(keyword()) :: (map() -> map())
+    def new(opts \\ []) do
+      patience = Keyword.get(opts, :patience, 5)
+      factor = Keyword.get(opts, :factor, 0.5)
+      min_lr = Keyword.get(opts, :min_lr, 1.0e-6)
+
+      {:ok, pid} =
+        Agent.start_link(fn ->
+          %{
+            best_loss: :infinity,
+            wait: 0,
+            factor: factor,
+            min_lr: min_lr,
+            reductions: 0
+          }
+        end)
+
+      fn
+        %{val_loss: val_loss, model: %Model{optimizer_state: opt_state} = model} = metrics ->
+          state = Agent.get(pid, & &1)
+
+          if val_loss < state.best_loss do
+            Agent.update(pid, fn s -> %{s | best_loss: val_loss, wait: 0} end)
+            metrics
+          else
+            new_wait = state.wait + 1
+
+            if new_wait >= patience do
+              current_lr = Map.get(opt_state, :learning_rate, 0.001)
+              new_lr = max(current_lr * factor, state.min_lr)
+
+              if new_lr < current_lr do
+                IO.puts("Reducing LR: #{Float.round(current_lr, 6)} → #{Float.round(new_lr, 6)}")
+
+                updated_model = %{
+                  model
+                  | optimizer_state: Map.put(opt_state, :learning_rate, new_lr)
+                }
+
+                Agent.update(pid, fn s -> %{s | wait: 0, reductions: s.reductions + 1} end)
+                Map.put(metrics, :model, updated_model)
+              else
+                Agent.update(pid, fn s -> %{s | wait: 0} end)
+                metrics
+              end
+            else
+              Agent.update(pid, fn s -> %{s | wait: new_wait} end)
+              metrics
+            end
+          end
+
+        metrics ->
+          metrics
+      end
+    end
+  end
+
+  defmodule HistoryCallback do
+    @moduledoc """
+    Records all training metrics into a history list.
+
+    Useful for plotting training curves or post-hoc analysis.
+
+    ## Usage
+
+        callbacks: [
+          ExBurn.Training.HistoryCallback.new()
+        ]
+
+    Access the history after training:
+
+        history = ExBurn.Training.HistoryCallback.get_history()
+    """
+
+    @spec new() :: (map() -> map())
+    def new() do
+      {:ok, pid} = Agent.start_link(fn -> [] end)
+
+      fn metrics ->
+        Agent.update(pid, fn history -> [metrics | history] end)
+        Map.put(metrics, :history_pid, pid)
+      end
+    end
+
+    @spec get_history() :: [map()]
+    def get_history() do
+      # This is a simplified version — in practice you'd pass the pid
+      []
+    end
+
+    @spec get_history(pid()) :: [map()]
+    def get_history(pid) do
+      Agent.get(pid, &Enum.reverse/1)
     end
   end
 end

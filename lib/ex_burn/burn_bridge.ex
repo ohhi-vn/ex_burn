@@ -259,6 +259,8 @@ defmodule ExBurn.BurnBridge do
   @spec device_name() :: String.t()
   def device_name do
     ExBurn.Nif.device_name()
+  rescue
+    _ -> "NIF not loaded"
   end
 
   @doc """
@@ -319,6 +321,7 @@ defmodule ExBurn.BurnBridge do
 
   defp backend_name do
     name = device_name()
+
     cond do
       String.contains?(name, "CUDA") -> :cuda
       String.contains?(name, "Metal") -> :metal

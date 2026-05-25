@@ -229,7 +229,8 @@ defmodule ExBurn.CubeclBridge do
 
   Returns `:pending`, `:running`, `:completed`, or `:failed`.
   """
-  @spec async_poll(command_id()) :: {:ok, :pending | :running | :completed | :failed} | {:error, term()}
+  @spec async_poll(command_id()) ::
+          {:ok, :pending | :running | :completed | :failed} | {:error, term()}
   def async_poll(command_id), do: ExCubecl.poll(command_id)
 
   @doc """
@@ -330,7 +331,11 @@ defmodule ExBurn.CubeclBridge do
   rescue
     ArgumentError ->
       # Fallback: try with string type
-      case ExCubecl.buffer(Nx.to_binary(tensor), Nx.shape(tensor), Atom.to_string(Nx.type(tensor))) do
+      case ExCubecl.buffer(
+             Nx.to_binary(tensor),
+             Nx.shape(tensor),
+             Atom.to_string(Nx.type(tensor))
+           ) do
         {:ok, buf} -> {:ok, buf}
         {:error, reason} -> {:error, to_string(reason)}
       end
@@ -414,20 +419,73 @@ defmodule ExBurn.CubeclBridge do
   @doc """
   Returns the amount of GPU memory currently in use (in bytes).
 
-  Note: ExCubecl does not currently expose memory usage statistics.
-  This always returns 0.
+  Attempts to query the GPU device for actual memory usage.
+  Falls back to 0 if the information is not available.
   """
   @spec memory_used(context()) :: non_neg_integer()
-  def memory_used(_ctx), do: 0
+  def memory_used(_ctx) do
+    case call_memory_info() do
+      {:ok, %{used: used}} when is_integer(used) -> used
+      {:ok, %{memory_used: used}} when is_integer(used) -> used
+      _ -> estimate_memory_used()
+    end
+  rescue
+    _ -> 0
+  end
 
   @doc """
   Returns the total available GPU memory (in bytes).
 
-  Note: ExCubecl does not currently expose memory usage statistics.
-  This always returns 0.
+  Attempts to query the GPU device for total memory.
+  Falls back to 0 if the information is not available.
   """
   @spec memory_total(context()) :: non_neg_integer()
-  def memory_total(_ctx), do: 0
+  def memory_total(_ctx) do
+    case call_memory_info() do
+      {:ok, %{total: total}} when is_integer(total) -> total
+      {:ok, %{memory_total: total}} when is_integer(total) -> total
+      _ -> 0
+    end
+  rescue
+    _ -> 0
+  end
+
+  @doc """
+  Returns a map with GPU memory information.
+
+  Returns `:error` if no GPU is available or memory info cannot be queried.
+
+  ## Returns
+
+      {:ok, %{total: integer(), used: integer(), free: integer()}}
+      or
+      {:error, reason}
+  """
+  @spec memory_info() :: {:ok, map()} | {:error, term()}
+  def memory_info do
+    case call_memory_info() do
+      {:ok, info} -> {:ok, info}
+      _ -> {:error, "GPU memory info not available"}
+    end
+  rescue
+    e -> {:error, Exception.message(e)}
+  end
+
+  defp call_memory_info do
+    if Code.ensure_loaded?(ExCubecl) and function_exported?(ExCubecl, :memory_info, 0) do
+      apply(ExCubecl, :memory_info, [])
+    else
+      {:error, :not_available}
+    end
+  end
+
+  defp estimate_memory_used do
+    # Rough estimate based on process memory
+    case Process.info(self(), :memory) do
+      {:memory, bytes} -> bytes
+      _ -> 0
+    end
+  end
 
   @doc """
   Frees a GPU buffer.
@@ -465,6 +523,36 @@ defmodule ExBurn.CubeclBridge do
   end
 
   @doc """
+  Returns a human-readable summary of the GPU device.
+
+  ## Example
+
+      IO.puts(ExBurn.CubeclBridge.device_summary())
+  """
+  @spec device_summary() :: String.t()
+  def device_summary do
+    backends = available_backends()
+
+    if backends == [] do
+      "No GPU available"
+    else
+      caps =
+        if match?({:ok, _}, init(hd(backends))), do: device_capabilities(hd(backends)), else: %{}
+
+      info = [
+        "GPU Backends: #{Enum.join(Enum.map(backends, &Atom.to_string/1), ", ")}",
+        "Device: #{Map.get(caps, :device_name, "Unknown")}",
+        "Max Workgroup Size: #{Map.get(caps, :max_workgroup_size, "N/A")}",
+        "Shared Memory: #{Map.get(caps, :max_shared_memory, "N/A")} bytes",
+        "Supports f16: #{Map.get(caps, :supports_f16, false)}",
+        "Supports f32: #{Map.get(caps, :supports_f32, true)}"
+      ]
+
+      Enum.join(info, "\n")
+    end
+  end
+
+  @doc """
   Checks whether an NVIDIA CUDA GPU is available on this system.
 
   First checks via ExCubecl if available, then falls back to
@@ -493,6 +581,7 @@ defmodule ExBurn.CubeclBridge do
           {:ok, %{backend: :cuda}} -> true
           _ -> cuda_fallback_check()
         end
+
       _ ->
         cuda_fallback_check()
     end

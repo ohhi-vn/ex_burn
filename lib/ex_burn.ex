@@ -86,4 +86,92 @@ defmodule ExBurn do
     Nx.default_backend(ExBurn.Backend)
     :ok
   end
+
+  @doc """
+  Returns a summary of the ExBurn environment.
+
+  Includes version, device info, GPU availability, and available backends.
+
+  ## Example
+
+      IO.puts(ExBurn.summary())
+  """
+  @spec summary() :: String.t()
+  def summary do
+    device = device_name()
+    gpu? = cuda_available?()
+    backends = ExBurn.CubeclBridge.available_backends()
+
+    """
+    ExBurn v#{version()}
+    ──────────────────────────────
+    Device: #{device}
+    GPU: #{if gpu?, do: "available", else: "not available"}
+    Backends: #{Enum.join(Enum.map(backends, &Atom.to_string/1), ", ")}
+    """
+    |> String.trim()
+  end
+
+  @doc """
+  Checks whether the NIF library is loaded and functional.
+
+  Returns `true` if the NIF responds to a basic health check,
+  `false` otherwise.
+  """
+  @spec nif_loaded?() :: boolean()
+  def nif_loaded? do
+    try do
+      apply(ExBurn.Nif, :gpu_available, [])
+      true
+    rescue
+      _ -> false
+    end
+  end
+
+  @doc """
+  Returns the number of NIF functions registered by the Rust library.
+
+  Useful for debugging NIF loading issues.
+  """
+  @spec nif_function_count() :: non_neg_integer()
+  def nif_function_count do
+    if Code.ensure_loaded?(ExBurn.Nif) do
+      apply(ExBurn.Nif, :debug_nif_count, [])
+    else
+      0
+    end
+  rescue
+    _ -> 0
+  end
+
+  @doc """
+  Performs a quick smoke test of the ExBurn pipeline.
+
+  Creates a small tensor, runs it through the backend, and verifies
+  the result. Returns `:ok` on success or `{:error, reason}` on failure.
+
+  ## Example
+
+      case ExBurn.smoke_test() do
+        :ok -> IO.puts("ExBurn is working!")
+        {:error, message} -> IO.puts("ExBurn error: " <> message)
+      end
+  """
+  @spec smoke_test() :: :ok | {:error, String.t()}
+  def smoke_test do
+    try do
+      Nx.default_backend(ExBurn.Backend)
+
+      a = Nx.tensor([1.0, 2.0, 3.0])
+      b = Nx.tensor([4.0, 5.0, 6.0])
+      result = Nx.add(a, b)
+      [5.0, 7.0, 9.0] = Nx.to_list(result)
+
+      :ok
+    rescue
+      e -> {:error, "Smoke test failed: #{Exception.message(e)}"}
+    after
+      Nx.default_backend(Nx.BinaryBackend)
+    end
+  end
 end

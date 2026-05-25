@@ -28,8 +28,10 @@ defmodule ExBurn.Serving do
 
   alias ExBurn.Model
 
+  @type model :: ExBurn.Model.t()
+
   @type t :: %__MODULE__{
-          model: Model.t(),
+          model: model(),
           batch_size: pos_integer(),
           batch_timeout: pos_integer(),
           partitions: pos_integer(),
@@ -44,7 +46,7 @@ defmodule ExBurn.Serving do
   Returns a struct that can be passed to `Nx.Serving` or used directly
   with `run/2`.
   """
-  @spec new(Model.t(), keyword()) :: t()
+  @spec new(model(), keyword()) :: t()
   def new(%Model{} = model, opts \\ []) do
     %__MODULE__{
       model: model,
@@ -73,7 +75,7 @@ defmodule ExBurn.Serving do
       # Run inference
       output = Nx.Serving.run(serving, input)
   """
-  @spec build(Model.t(), keyword()) :: Nx.Serving.t()
+  @spec build(model(), keyword()) :: Nx.Serving.t()
   def build(%Model{} = model, opts \\ []) do
     batch_size = Keyword.get(opts, :batch_size, 32)
     batch_timeout = Keyword.get(opts, :batch_timeout, 50)
@@ -97,5 +99,35 @@ defmodule ExBurn.Serving do
     serving
     |> build()
     |> Nx.Serving.run(input)
+  end
+
+  @doc """
+  Returns the status of the serving as a map.
+
+  ## Returns
+
+      %{batch_size: pos_integer(), batch_timeout: pos_integer(),
+        partitions: pos_integer(), padding: boolean()}
+  """
+  @spec status(t()) :: map()
+  def status(%__MODULE__{} = serving) do
+    %{
+      batch_size: serving.batch_size,
+      batch_timeout: serving.batch_timeout,
+      partitions: serving.partitions,
+      padding: serving.padding
+    }
+  end
+
+  @doc "Returns a new serving with the specified batch size."
+  @spec with_batch_size(t(), pos_integer()) :: t()
+  def with_batch_size(%__MODULE__{} = serving, batch_size) do
+    %{serving | batch_size: batch_size}
+  end
+
+  @doc "Returns a new serving with the specified batch timeout."
+  @spec with_timeout(t(), pos_integer()) :: t()
+  def with_timeout(%__MODULE__{} = serving, timeout) do
+    %{serving | batch_timeout: timeout}
   end
 end

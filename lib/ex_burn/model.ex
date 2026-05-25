@@ -80,7 +80,7 @@ defmodule ExBurn.Model do
 
     An `ExBurn.Model` struct ready for training.
   """
-  @spec compile(Axon.ModelState.t(), keyword()) :: t()
+  @spec compile(Axon.ModelState.t() | Axon.t(), keyword()) :: t()
   def compile(%Axon.ModelState{} = axon_model, opts \\ []) do
     loss_fn = Keyword.get(opts, :loss, :cross_entropy)
     optimizer = Keyword.get(opts, :optimizer, :adam)
@@ -466,8 +466,9 @@ defmodule ExBurn.Model do
     ╚══════════════════════════════════════════════════════════════════════════════╝
     """
 
+    device_name = ExBurn.BurnBridge.device_name()
     device_info =
-      "  Device: #{if axon_model, do: "Axon model", else: "N/A"} | Backend: ExBurn (#{ExBurn.BurnBridge.device_name()})\n"
+      "  Device: #{if axon_model, do: "Axon model", else: "N/A"} | Backend: ExBurn (#{device_name})\n"
 
     header <> layer_rows <> footer <> totals <> close <> device_info
   end
@@ -519,6 +520,250 @@ defmodule ExBurn.Model do
     end
   end
 
+  @doc """
+  Quantizes model parameters to a lower precision type.
+
+  Useful for reducing model size and speeding up inference on devices
+  with limited compute. Currently supports `:f16` (half precision) and
+  `:bf16` (brain float 16).
+
+  ## Parameters
+
+    * `model` — A compiled `ExBurn.Model` struct
+    * `dtype` — Target dtype: `:f16` or `:bf16`
+
+  ## Returns
+
+    A new `ExBurn.Model` struct with quantized parameters.
+
+  ## Examples
+
+      quantized_model = ExBurn.Model.quantize(model, :f16)
+  """
+  @spec quantize(t(), :f16 | :bf16) :: t()
+  def quantize(%__MODULE__{params: params} = model, dtype) when dtype in [:f16, :bf16] do
+    nx_type = if dtype == :f16, do: {:f, 16}, else: {:bf, 16}
+
+    quantized_params =
+      Enum.map(params, fn
+        {key, %Nx.Tensor{} = tensor} ->
+          {key, Nx.as_type(tensor, nx_type)}
+
+        {key, value} ->
+          {key, value}
+      end)
+      |> Map.new()
+
+    %{model | params: quantized_params}
+  end
+
+  @doc ~S"""
+  Benchmarks the model's forward pass on the given input.
+
+  Runs the forward pass multiple times and returns timing statistics.
+
+  ## Parameters
+
+    * `model` — A compiled `ExBurn.Model` struct
+    * `input` — An `Nx.Tensor` input batch
+    * `opts` — Options
+      * `:warmup` — Number of warmup runs (default: 3)
+      * `:runs` — Number of benchmarked runs (default: 10)
+
+  ## Returns
+
+    A map with `:avg_ms`, `:min_ms`, `:max_ms`, `:median_ms`, `:std_ms`.
+
+  ## Example
+
+      result = ExBurn.Model.benchmark(model, input, warmup: 5, runs: 20)
+      IO.puts("Average: #{result.avg_ms}ms")
+  """
+  @spec benchmark(t(), Nx.Tensor.t(), keyword()) :: map()
+  def benchmark(%__MODULE__{} = model, %Nx.Tensor{} = input, opts \\ []) do
+    warmup = Keyword.get(opts, :warmup, 3)
+    runs = Keyword.get(opts, :runs, 10)
+
+    # Warmup
+    Enum.each(1..warmup, fn ->
+      ExBurn.Model.predict(model, input)
+    end)
+
+    # Benchmark
+    times =
+      Enum.map(1..runs, fn ->
+        start = System.monotonic_time(:microsecond)
+        ExBurn.Model.predict(model, input)
+        System.monotonic_time(:microsecond) - start
+      end)
+
+    times_ms = Enum.map(times, &(&1 / 1000))
+    avg = Enum.sum(times_ms) / length(times_ms)
+    min = Enum.min(times_ms)
+    max = Enum.max(times_ms)
+    median = times_ms |> Enum.sort() |> Enum.at(div(length(times_ms), 2))
+    variance = Enum.sum(Enum.map(times_ms, &(&1 - avg) * (&1 - avg))) / length(times_ms)
+    std = :math.sqrt(variance)
+
+    %{
+      avg_ms: Float.round(avg, 3),
+      min_ms: Float.round(min, 3),
+      max_ms: Float.round(max, 3),
+      median_ms: Float.round(median, 3),
+      std_ms: Float.round(std, 3),
+      runs: runs,
+      warmup: warmup
+    }
+  end
+
+  @doc """
+  Creates a deep copy of the model with identical parameters and configuration.
+
+  Useful for creating model snapshots during training or for ensemble methods.
+
+  ## Example
+
+      snapshot = ExBurn.Model.clone(model)
+  """
+  @spec clone(t()) :: t()
+  def clone(%__MODULE__{} = model) do
+    cloned_params =
+      Enum.map(model.params, fn
+        {key, %Nx.Tensor{} = tensor} -> {key, Nx.tensor(Nx.to_list(tensor), type: Nx.type(tensor))}
+        {key, value} -> {key, value}
+      end)
+      |> Map.new()
+
+    %{model | params: cloned_params}
+  end
+
+  @doc ~S"""
+  Returns a map with model information.
+
+  Includes parameter count, layer count, loss function, optimizer,
+  device, and memory estimate.
+
+  ## Example
+
+      info = ExBurn.Model.info(model)
+      IO.puts("Parameters: #{info.total_params}")
+  """
+  @spec info(t()) :: map()
+  def info(%__MODULE__{} = model) do
+    param_count =
+      Enum.reduce(model.params, 0, fn
+        {_key, %Nx.Tensor{} = tensor}, acc -> acc + Nx.size(tensor)
+        _, acc -> acc
+      end)
+
+    layer_count = map_size(model.params)
+
+    # Estimate memory (4 bytes per f32 parameter)
+    memory_bytes = param_count * 4
+    memory_mb = Float.round(memory_bytes / 1_048_576, 2)
+
+    %{
+      total_params: param_count,
+      layer_count: layer_count,
+      loss_function: model.loss_fn,
+      optimizer: model.optimizer,
+      learning_rate: get_in(model.optimizer_state, [:learning_rate]),
+      device: model.device,
+      weight_decay: model.weight_decay,
+      frozen_layers_count: MapSet.size(model.frozen_layers),
+      estimated_memory_mb: memory_mb,
+      compiled: model.compiled
+    }
+  end
+
+  @doc """
+  Exports the model parameters to a portable format.
+
+  Currently supports:
+    * `:elixir_terms` — Compressed Erlang term format (default, portable)
+    * `:json` — JSON format (human-readable, larger)
+
+  ## Example
+
+      ExBurn.Model.export(model, "/tmp/model.json", format: :json)
+  """
+  @spec export(t(), Path.t(), keyword()) :: :ok | {:error, String.t()}
+  def export(%__MODULE__{params: params}, path, opts \\ []) do
+    format = Keyword.get(opts, :format, :elixir_terms)
+
+    case format do
+      :elixir_terms ->
+        binary = :erlang.term_to_binary(params, compressed: 9)
+        File.write(path, binary)
+
+      :json ->
+        json_data =
+          Enum.map(params, fn
+            {key, %Nx.Tensor{} = tensor} ->
+              {key, %{
+                "shape" => Tuple.to_list(Nx.shape(tensor)),
+                "type" => Atom.to_string(Nx.type(tensor)),
+                "data" => Nx.to_list(tensor)
+              }}
+
+            {key, value} ->
+              {key, inspect(value)}
+          end)
+          |> Map.new()
+          |> Jason.encode!()
+
+        File.write(path, json_data)
+
+      other ->
+        {:error, "Unsupported export format: #{inspect(other)}"}
+    end
+  end
+
+  @doc """
+  Imports model parameters from a file saved with `export/2`.
+
+  ## Example
+
+      {:ok, model} = ExBurn.Model.import_params(model, "/tmp/model.etf")
+  """
+  @spec import_params(t(), Path.t(), keyword()) :: {:ok, t()} | {:error, String.t()}
+  def import_params(%__MODULE__{} = model, path, opts \\ []) do
+    format = Keyword.get(opts, :format, :elixir_terms)
+
+    case File.read(path) do
+      {:ok, binary} ->
+        params =
+          case format do
+            :elixir_terms ->
+              :erlang.binary_to_term(binary)
+
+            :json ->
+              case Jason.decode(binary) do
+                {:ok, json_map} ->
+                  Enum.map(json_map, fn
+                    {key, %{"shape" => shape, "type" => type_str, "data" => data}} ->
+                      nx_type = String.to_atom(type_str)
+                      tensor = Nx.tensor(data, type: nx_type) |> Nx.reshape(List.to_tuple(shape))
+                      {key, tensor}
+
+                    {key, value} ->
+                      {key, value}
+                  end)
+                  |> Map.new()
+
+                {:error, reason} ->
+                  raise ExBurn.Error, op: :import_params, reason: "Invalid JSON: #{inspect(reason)}"
+              end
+          end
+
+        {:ok, %{model | params: params, compiled: true}}
+
+      {:error, reason} ->
+        {:error, "Failed to read file: #{inspect(reason)}"}
+    end
+  end
+
+
   # ── Private Functions ────────────────────────────────────────────
 
   # Forward pass using the ExBurn defn compiler.
@@ -555,24 +800,23 @@ defmodule ExBurn.Model do
 
   # ── Parameter Initialization ──────────────────────────────────────
 
-  defp initialize_params(model, device) do
-    # Axon.build returns {expr, init_fn}. The init_fn returns the
-    # initial parameters when called with %{} or an input template.
-    {_expr, init_fn} = Axon.build(model, %{})
-
-    # Call init_fn to get the parameter map
-    params = init_fn.(%{})
+  defp initialize_params(%Axon.ModelState{} = model, _device) do
+    # Axon.ModelState.data is a map of layer_name => %{param_name => tensor}
+    # Flatten to a single map of "layer_name.param_name" => tensor
+    params = flatten_model_state_data(model)
 
     # Apply Glorot/Xavier initialization for better training dynamics
     params = apply_glorot_init(params)
 
-    if device == :gpu do
-      Enum.map(params, fn {key, value} ->
-        {key, ExBurn.BurnBridge.to_gpu(ExBurn.BurnBridge.from_nx(value))}
-      end)
-      |> Map.new()
-    else
-      params
+    # Note: GPU transfer is handled by to_device/2 after compilation
+    params
+  end
+
+  defp flatten_model_state_data(model) do
+    for {layer_name, layer_params} <- model.data,
+        {param_name, tensor} <- layer_params,
+        into: %{} do
+      {layer_name <> "." <> param_name, tensor}
     end
   end
 
