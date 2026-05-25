@@ -42,8 +42,16 @@ Metal (iOS) / Vulkan (Android) / CUDA → GPU
 | Nx.Defn.Compiler | ✅ Implemented |
 | Rust NIF bridge (Burn CubeCL) | ✅ Implemented |
 | GPU acceleration (Metal/Vulkan) | ✅ Via Burn/CubeCL |
-| Axon model compilation | 🔄 Basic support |
-| Training loop (SGD/Adam/RMSprop) | 🔄 Basic support |
+| Axon model compilation | ✅ Implemented |
+| Training loop (SGD/Adam/RMSprop) | ✅ Implemented |
+| GPU forward pass (defn compiler) | ✅ Implemented |
+| Glorot/Xavier initialization | ✅ Implemented |
+| Layer freeze/unfreeze | ✅ Implemented |
+| Gradient accumulation | ✅ Implemented |
+| Nesterov momentum | ✅ Implemented |
+| Weight decay (L2) | ✅ Implemented |
+| Model summary | ✅ Implemented |
+| Device management (CPU↔GPU) | ✅ Implemented |
 | Nx.Serving | ✅ Implemented |
 | CUDA backend | ✅ Implemented |
 | Precompiled NIF binaries | 🚧 Planned |
@@ -159,8 +167,10 @@ training even small models may cause out-of-memory errors. Realistic expectation
 - **Inference** is the primary use case for mobile deployment
 - Minimum recommended: 4GB RAM, A12+ chip (iOS) / Snapdragon 700+ (Android)
 
-The training loop in ExBurn currently uses numerical gradients. Burn's autodiff
-integration is planned for v0.3.0.
+The training loop in ExBurn currently uses numerical gradients (finite differences).
+Two methods are available: `:numerical` (central differences, more accurate) and
+`:numerical_batch` (one-sided, ~2x faster). Burn's autodiff integration is
+planned for v0.3.0 and will replace numerical gradients entirely.
 
 ## Examples
 
@@ -170,10 +180,15 @@ mix run examples/linear_regression.exs
 
 # MNIST-like classifier (full deep learning pipeline)
 mix run examples/mnist_simple.exs
-
-# GPU-accelerated inference with ExCubecl
-mix run examples/gpu_inference.exs
 ```
+
+## Guides
+
+- [Getting Started](guides/01_getting_started.md) — Installation, basic ops, GPU check
+- [Training Models](guides/02_training.md) — Models, training, callbacks, save/load
+- [Mobile Deployment](guides/03_mobile_deployment.md) — iOS/Android compilation, optimization
+- [Architecture](guides/04_architecture.md) — Deep-dive into the pipeline
+- [Training Optimization](guides/05_training_optimization.md) — Best practices for fast, stable training
 
 ## Project Structure
 

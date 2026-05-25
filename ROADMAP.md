@@ -7,6 +7,17 @@
 - Training loop with numerical gradients
 - Nx.Serving integration
 
+### Completed Improvements
+- Axon model compilation with GPU forward pass via `Nx.Defn.jit_apply` + `ExBurn.Defn.Compiler`
+- Glorot/Xavier parameter initialization
+- Keras/PyTorch-style model summary with layer-by-layer inspection
+- Layer freeze/unfreeze for fine-tuning
+- Device management (`to_device/2`) for CPU ↔ GPU parameter transfer
+- Training loop: batch shuffling, Nesterov momentum, weight decay, gradient accumulation
+- Training loop: accuracy tracking, ETA/progress reporting, `train_step/3` for custom loops
+- Improved numerical gradient (`:numerical_batch` method, 2x fewer forward passes)
+- `evaluate/2` with accuracy tracking and proper partial batch handling
+
 ## v0.2.0 — Precompiled NIFs
 - rustler_precompiled with GitHub Actions
 - Cross-compiled binaries for aarch64-apple-ios, aarch64-linux-android

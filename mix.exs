@@ -88,7 +88,8 @@ defmodule ExBurn.MixProject do
         "guides/01_getting_started.md",
         "guides/02_training.md",
         "guides/03_mobile_deployment.md",
-        "guides/04_architecture.md"
+        "guides/04_architecture.md",
+        "guides/05_training_optimization.md"
       ],
       groups_for_extras: [
         Guides: ~r/guides\//

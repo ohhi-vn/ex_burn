@@ -74,7 +74,9 @@ defmodule ExBurn.CudaTest do
     @tag :nif
     test "contains backend identifier" do
       name = ExBurn.device_name() |> String.downcase()
-      assert name =~ "cuda" or name =~ "metal" or name =~ "vulkan" or name =~ "ndarray" or name =~ "cpu"
+
+      assert name =~ "cuda" or name =~ "metal" or name =~ "vulkan" or name =~ "ndarray" or
+               name =~ "cpu"
     end
   end
 
@@ -306,7 +308,7 @@ defmodule ExBurn.CudaTest do
   # CUDA-specific tests (require NVIDIA GPU)
   # ═══════════════════════════════════════════════════════════════════
 
-  describe "CUDA backend", @tag :cuda do
+  describe "CUDA backend" do
     @tag :cuda
     test "gpu_available? returns true" do
       assert ExBurn.Nif.gpu_available() == true
@@ -363,7 +365,7 @@ defmodule ExBurn.CudaTest do
   # Metal-specific tests (require Apple GPU)
   # ═══════════════════════════════════════════════════════════════════
 
-  describe "Metal backend", @tag :metal do
+  describe "Metal backend" do
     @tag :metal
     test "gpu_available? returns true" do
       assert ExBurn.Nif.gpu_available() == true
@@ -470,7 +472,7 @@ defmodule ExBurn.CudaTest do
   # Vulkan-specific tests (require Vulkan-capable GPU)
   # ═══════════════════════════════════════════════════════════════════
 
-  describe "Vulkan backend", @tag :vulkan do
+  describe "Vulkan backend" do
     @tag :vulkan
     test "gpu_available? returns true" do
       assert ExBurn.Nif.gpu_available() == true

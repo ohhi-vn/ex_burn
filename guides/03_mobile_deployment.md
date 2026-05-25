@@ -2,56 +2,46 @@
 
 ## Overview
 
-ExBurn compiles trained models for mobile deployment via Burn's CubeCL backend.
-The pipeline optimizes models for the target GPU backend:
+ExBurn compiles models for mobile deployment via Burn's CubeCL backend:
 
 - **iOS**: Metal via CubeCL
 - **Android**: Vulkan via CubeCL
 
-ExBurn is designed as a library — it provides the Nx backend and GPU
-acceleration layer that other frameworks can build on top of.
+The typical workflow is: train on a desktop GPU → save the model → load and run inference on mobile.
 
-## Compiling a Model
+## Training and Saving on Desktop
 
 ```elixir
-# Define a model with Axon
+# Train on desktop (CUDA or Metal)
 model =
   Axon.input("input", shape: {nil, 784})
   |> Axon.dense(128, activation: :relu)
   |> Axon.dropout(rate: 0.2)
   |> Axon.dense(10)
 
-# Compile for training/inference
 compiled = ExBurn.Model.compile(model,
   loss: :cross_entropy,
   optimizer: :adam,
   learning_rate: 0.001
 )
 
-# Run inference
-{:ok, output} = ExBurn.Model.predict(compiled, input_tensor)
+trained = ExBurn.Training.fit(compiled, {train_x, train_y},
+  epochs: 20,
+  batch_size: 64
+)
 
 # Save for deployment
-ExBurn.Model.save(compiled, "model.bin")
-
-# Load
-{:ok, loaded} = ExBurn.Model.load(compiled, "model.bin")
+ExBurn.Model.save(trained, "model.bin")
 ```
 
-## Using ExCubecl for GPU Inference
-
-ExBurn integrates with ExCubecl for GPU buffer management and kernel execution:
+## Loading and Inference on Mobile
 
 ```elixir
-# Create GPU buffers via ExCubecl
-{:ok, input_buf} = ExCubecl.buffer([1.0, 2.0, 3.0], [3], :f32)
-{:ok, output_buf} = ExCubecl.buffer([0.0, 0.0, 0.0], [3], :f32)
+# Load the model on the mobile device
+{:ok, model} = ExBurn.Model.load(compiled, "model.bin")
 
-# Run a kernel
-ExCubecl.run_kernel("elementwise_add", [input_buf, input_buf], output_buf)
-
-# Read results back
-{:ok, data} = ExCubecl.read(output_buf)
+# Run inference
+{:ok, output} = ExBurn.Model.predict(model, input_tensor)
 ```
 
 ## Using ExBurn.Serving for Batched Inference
@@ -59,32 +49,109 @@ ExCubecl.run_kernel("elementwise_add", [input_buf, input_buf], output_buf)
 For production inference with concurrent batching:
 
 ```elixir
-# Build a serving from a compiled model
-serving = ExBurn.Serving.build(compiled,
+serving = ExBurn.Serving.build(model,
   batch_size: 32,
-  batch_timeout: 50
+  batch_timeout: 50,
+  partitions: System.schedulers_online()
 )
 
-# Run batched inference
 output = Nx.Serving.run(serving, input_tensor)
 ```
 
-## Model Optimization Tips
+## Cross-Compilation
 
-1. **Use f16 quantization**: Halves memory usage with minimal accuracy loss
-2. **Reduce model size**: Target < 10MB for mobile apps
-3. **Batch inference**: Process multiple inputs together for better throughput
-4. **Use ExCubecl pipelines**: Chain multiple GPU kernels without CPU round-trips
-5. **Profile on device**: Benchmark on the target hardware before deploying
+### iOS (Metal)
+
+```bash
+# Add the iOS target
+rustup target add aarch64-apple-ios
+
+# Build the NIF for iOS
+cd native/ex_burn_nif
+cargo build --target aarch64-apple-ios --features metal --no-default-features --release
+```
+
+### Android (Vulkan)
+
+```bash
+# Add the Android target
+rustup target add aarch64-linux-android
+
+# Build the NIF for Android
+cd native/ex_burn_nif
+cargo build --target aarch64-linux-android --features vulkan --no-default-features --release
+```
+
+### CPU-only Fallback
+
+```bash
+cd native/ex_burn_nif
+cargo build --no-default-features --release
+```
+
+## Model Optimization for Mobile
+
+### 1. Use f16 Precision
+
+Halves memory usage with minimal accuracy loss on inference:
+
+```elixir
+# Convert parameters to f15
+# (planned — currently use Nx's built-in type conversion)
+```
+
+### 2. Reduce Model Size
+
+| Model Size | Feasibility on Mobile |
+|---|---|
+| < 1M params | ✅ Comfortable on all modern devices |
+| 1M – 10M params | ✅ Fine for inference, training may OOM |
+| 10M – 50M params | ⚠️ Inference only, may need quantization |
+| > 50M params | ❌ Not recommended for mobile |
+
+### 3. Use ExCubecl Pipelines
+
+Chain multiple GPU kernels without CPU round-trips:
+
+```elixir
+{:ok, pipeline} = ExBurn.CubeclBridge.pipeline()
+ExBurn.CubeclBridge.pipeline_add(pipeline, "dense", [input_buf, weight_buf, bias_buf], output_buf)
+ExBurn.CubeclBridge.pipeline_add(pipeline, "relu", [output_buf], output_buf)
+{:ok, _} = ExBurn.CubeclBridge.pipeline_run(pipeline)
+```
+
+### 4. Batch Inference
+
+Process multiple inputs together for better GPU utilization:
+
+```elixir
+serving = ExBurn.Serving.build(model, batch_size: 16, batch_timeout: 100)
+```
 
 ## Supported Operations
 
-| Operation | iOS (Metal) | Android (Vulkan) |
-|-----------|-------------|------------------|
-| Dense     | ✅          | ✅               |
-| Conv2D    | ✅          | ✅               |
-| ReLU      | ✅          | ✅               |
-| Sigmoid   | ✅          | ✅               |
-| Softmax   | ✅          | ✅               |
-| Dropout   | ✅          | ✅               |
-| LayerNorm | ✅          | ✅               |
+| Operation | iOS (Metal) | Android (Vulkan) | Notes |
+|---|---|---|---|
+| Dense / Linear | ✅ | ✅ | |
+| Conv2D | ✅ | ✅ | |
+| ReLU | ✅ | ✅ | |
+| Sigmoid | ✅ | ✅ | |
+| Softmax | ✅ | ✅ | |
+| Dropout | ✅ | ✅ | No-op during inference |
+| LayerNorm | ✅ | ✅ | |
+| MatMul | ✅ | ✅ | |
+| Transpose | ✅ | ✅ | |
+| Reshape | ✅ | ✅ | |
+| Concatenate | ✅ | ✅ | |
+| Slice | ✅ | ✅ | |
+
+## Memory Considerations
+
+- Burn's Autodiff backend is memory-intensive. **Training on mobile is only feasible for small models** (< 10M parameters).
+- **Inference is the primary use case** for mobile deployment.
+- Minimum recommended: 4GB RAM, A12+ chip (iOS) / Snapdragon 700+ (Android).
+- Use gradient checkpointing (planned for v0.3.0) to reduce training memory.
+
+## Precompiled NIFs (v0.2.0)
+
+Starting with v0.2.0, precompiled NIF binaries are distributed via `rustler_precompiled`, eliminating the Rust toolchain requirement for end users. The NIF automatically downloads the correct binary for the target platform.
