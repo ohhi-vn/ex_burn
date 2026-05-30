@@ -15,7 +15,7 @@ Add to `mix.exs`:
 ```elixir
 def deps do
   [
-    {:ex_burn, "~> 0.2"},
+    {:ex_burn, "~> 0.3"},
     {:nx, ">= 0.12.0"},
     {:axon, "~> 0.8"},
     {:ex_cubecl, ">= 0.4.0"}
@@ -102,7 +102,7 @@ compiler: ExBurn.Defn.Compiler
 ```elixir
 # Quick check
 ExBurn.default_device()    # :gpu or :cpu
-ExBurn.device_name()       # e.g. "CUDA (NVIDIA RTX 4090)" or "Metal (Apple M4)"
+ExBurn.device_name()       # e.g. "CUDA (NVIDIA GPU)" or "Metal (Apple GPU)"
 ExBurn.device_info()       # full map with :device, :gpu_available, :backend, :available_backends
 ExBurn.cuda_available?()   # true if NVIDIA GPU detected
 ```
@@ -169,6 +169,7 @@ native/ex_burn_nif/
 
 ## Next Steps
 
+- [Deep Learning Guide](06_deep_learning_guide.md) — Step-by-step lessons for learning deep learning with ExBurn
 - [Training Models](02_training.md) — Define, compile, and train neural networks
 - [Mobile Deployment](03_mobile_deployment.md) — iOS/Android compilation and optimization
 - [Architecture Deep-Dive](04_architecture.md) — How the pipeline works internally

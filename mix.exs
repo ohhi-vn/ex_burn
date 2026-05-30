@@ -2,7 +2,7 @@ defmodule ExBurn.MixProject do
   use Mix.Project
 
   @app :ex_burn
-  @version "0.3.0"
+  @version "0.3.1"
   @github_url "https://github.com/ohhi-vn/ex_burn"
 
   def project do
@@ -89,7 +89,8 @@ defmodule ExBurn.MixProject do
         "guides/02_training.md",
         "guides/03_mobile_deployment.md",
         "guides/04_architecture.md",
-        "guides/05_training_optimization.md"
+        "guides/05_training_optimization.md",
+        "guides/06_deep_learning_guide.md"
       ],
       groups_for_extras: [
         Guides: ~r/guides\//

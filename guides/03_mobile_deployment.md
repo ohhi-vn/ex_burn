@@ -96,8 +96,8 @@ cargo build --no-default-features --release
 Halves memory usage with minimal accuracy loss on inference:
 
 ```elixir
-# Convert parameters to f15
-# (planned — currently use Nx's built-in type conversion)
+# Quantize model parameters to f16
+quantized_model = ExBurn.Model.quantize(model, :f16)
 ```
 
 ### 2. Reduce Model Size
@@ -115,8 +115,8 @@ Chain multiple GPU kernels without CPU round-trips:
 
 ```elixir
 {:ok, pipeline} = ExBurn.CubeclBridge.pipeline()
-ExBurn.CubeclBridge.pipeline_add(pipeline, "dense", [input_buf, weight_buf, bias_buf], output_buf)
-ExBurn.CubeclBridge.pipeline_add(pipeline, "relu", [output_buf], output_buf)
+ExBurn.CubeclBridge.pipeline_add(pipeline, :dense, [input_buf, weight_buf, bias_buf], output_buf)
+ExBurn.CubeclBridge.pipeline_add(pipeline, :relu, [output_buf], output_buf)
 {:ok, _} = ExBurn.CubeclBridge.pipeline_run(pipeline)
 ```
 
@@ -150,8 +150,8 @@ serving = ExBurn.Serving.build(model, batch_size: 16, batch_timeout: 100)
 - Burn's Autodiff backend is memory-intensive. **Training on mobile is only feasible for small models** (< 10M parameters).
 - **Inference is the primary use case** for mobile deployment.
 - Minimum recommended: 4GB RAM, A12+ chip (iOS) / Snapdragon 700+ (Android).
-- Use gradient checkpointing (planned for v0.3.0) to reduce training memory.
+- Use gradient accumulation (`:accumulate_gradients`) to reduce per-batch memory usage.
 
-## Precompiled NIFs (v0.2.0)
+## Precompiled NIFs
 
-Starting with v0.2.0, precompiled NIF binaries are distributed via `rustler_precompiled`, eliminating the Rust toolchain requirement for end users. The NIF automatically downloads the correct binary for the target platform.
+Precompiled NIF binaries are planned for future release via `rustler_precompiled`, which would eliminate the Rust toolchain requirement for end users. The NIF would automatically download the correct binary for the target platform.

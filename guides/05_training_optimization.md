@@ -17,7 +17,7 @@
 
 ### Current Limitation: Numerical Gradients
 
-ExBurn v0.1.0 uses **numerical differentiation** (finite differences) to compute gradients. This is the main performance bottleneck.
+ExBurn uses **numerical differentiation** (finite differences) to compute gradients. This is the main performance bottleneck.
 
 ```
 Central differences:  ∂L/∂w ≈ (L(w + ε) - L(w - ε)) / 2ε
@@ -41,13 +41,13 @@ grads = ExBurn.Training.compute_gradients(model, {x, y}, grad_method: :numerical
 | `:numerical` | 2N | O(ε²) | Small models, high accuracy needed |
 | `:numerical_batch` | N+1 | O(ε) | Larger models, speed matters more |
 
-### When Autodiff Arrives (v0.3.0)
+### When Autodiff Arrives
 
 Burn's Autodiff backend will compute exact gradients in a **single backward pass**, regardless of parameter count. This is a game-changer:
 
 ```
-Numerical (v0.1.0):  200K forward passes for 100K params
-Autodiff (v0.3.0):   1 backward pass for any model size
+Numerical (current):  200K forward passes for 100K params
+Autodiff (planned):   1 backward pass for any model size
 ```
 
 **Recommendation**: For now, keep models small (< 50K params) for training. Use larger models only for inference.
@@ -167,7 +167,7 @@ LR
 - Start with Adam + cosine annealing for best results
 - If loss oscillates, reduce the base learning rate
 - If convergence is too slow, increase the base learning rate
-- Use warmup (planned) for large batch sizes
+- Use warmup for large batch sizes: `callbacks: [ExBurn.Training.WarmupCallback.linear(5, 1.0e-5, 0.001)]`
 
 ## Gradient Clipping
 
@@ -285,7 +285,7 @@ ExBurn.Tensor.free(intermediate_tensor)
 2. **Use gradient accumulation** — same effective batch, less memory
 3. **Free tensors explicitly** — don't wait for GC
 4. **Use f16 precision** — halves memory for tensors
-5. **Avoid storing all intermediate activations** — use gradient checkpointing (planned)
+5. **Avoid storing all intermediate activations** — use `:accumulate_gradients` to reduce peak memory
 
 ## Common Problems and Solutions
 

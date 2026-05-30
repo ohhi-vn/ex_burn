@@ -103,7 +103,7 @@ ExBurn.Nif.add_tensor(ref_a, ref_b)  # NIF call to Rust
 {:ok, ref_c}  # New tensor reference
 ```
 
-The backend handles 100+ operations including:
+The backend implements 100+ operation callbacks including:
 - **Arithmetic**: add, subtract, multiply, divide, negate, abs, exp, log, sqrt, pow
 - **Trig**: sin, cos, tan, asin, acos, atan, sinh, cosh, tanh
 - **Reductions**: sum, product, reduce_max, reduce_min, argmax, argmin, all, any
@@ -159,9 +159,6 @@ enum BurnTensor {
     F32x2(Tensor<B, 2>),   # 2D f32 tensor
     F32x3(Tensor<B, 3>),   # 3D f32 tensor
     F32x4(Tensor<B, 4>),   # 4D f32 tensor (images: batch, channels, height, width)
-    I32x1(Tensor<B, 1, Int>),
-    I64x1(Tensor<B, 1, Int>),
-    # ... other types
 }
 ```
 
@@ -174,7 +171,7 @@ enum BurnTensor {
 
 ## Gradient Computation
 
-### Current: Numerical Gradients (v0.1.0)
+### Current: Numerical Gradients
 
 The training loop uses **finite differences** to approximate gradients:
 
@@ -191,7 +188,7 @@ This requires **2 forward passes per parameter**, making it slow for large model
 
 Where N = number of scalar parameters.
 
-### Planned: Burn Autodiff (v0.3.0)
+### Planned: Burn Autodiff
 
 ```
 Forward pass                    Backward pass
@@ -251,6 +248,6 @@ raise ExBurn.Error,
 1. **Minimize NIF round-trips**: Each NIF call has overhead. Use `BurnBridge` for multi-op sequences instead of individual Nx calls.
 2. **Batch conversions**: Convert multiple tensors at once when possible.
 3. **Shape caching**: Shapes are tracked on the Elixir side — no NIF call needed to check shape.
-4. **f16 on mobile**: Use `Nx.f16` tensors for 2x memory reduction on mobile GPUs.
+4. **f16 on mobile**: Use `ExBurn.Model.quantize(model, :f16)` for 2x memory reduction on mobile GPUs.
 5. **Use ExCubecl pipelines**: Chain multiple GPU kernels without CPU round-trips.
 6. **Gradient accumulation**: Use `:accumulate_gradients` to simulate larger batch sizes without increasing memory usage.

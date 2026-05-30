@@ -280,14 +280,13 @@ For full control, use `train_step/3` directly:
 
 ```elixir
 {loss, updated_model} = ExBurn.Training.train_step(model, {batch_x, batch_y},
-  clip_norm: 1.0,
-  grad_method: :numerical_batch
+  clip_norm: 1.0
 )
 ```
 
 Compute gradients separately:
 
-```lixir
+```elixir
 grads = ExBurn.Training.compute_gradients(model, {batch_x, batch_y},
   grad_method: :numerical  # or :numerical_batch
 )
