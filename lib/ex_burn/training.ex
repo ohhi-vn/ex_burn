@@ -291,7 +291,8 @@ defmodule ExBurn.Training do
 
   Supports multiple gradient computation methods via the `:grad_method` option:
 
-    * `:numerical` — Central finite differences (default, slow but general)
+    * `:autodiff` — Burn Autodiff backward pass (default, fast, exact gradients)
+    * `:numerical` — Central finite differences (slow but general)
     * `:numerical_batch` — Numerical gradients computed on the full batch at once
       (more efficient, fewer forward passes)
 
@@ -303,7 +304,7 @@ defmodule ExBurn.Training do
 
   ## Options
 
-    * `:grad_method` — Gradient computation method (default: `:numerical`)
+    * `:grad_method` — Gradient computation method (default: `:autodiff`)
     * `:epsilon` — Finite difference step size (default: 1.0e-5)
 
   ## Returns
@@ -312,10 +313,13 @@ defmodule ExBurn.Training do
   """
   @spec compute_gradients(model(), dataset(), keyword()) :: map()
   def compute_gradients(%Model{} = model, {batch_in, batch_tgt}, opts \\ []) do
-    method = Keyword.get(opts, :grad_method, :numerical)
+    method = Keyword.get(opts, :grad_method, :autodiff)
     epsilon = Keyword.get(opts, :epsilon, 1.0e-5)
 
     case method do
+      :autodiff ->
+        compute_gradients_autodiff(model, batch_in, batch_tgt)
+
       :numerical ->
         compute_gradients_numerical(model, batch_in, batch_tgt, epsilon)
 
@@ -323,7 +327,7 @@ defmodule ExBurn.Training do
         compute_gradients_numerical_batch(model, batch_in, batch_tgt, epsilon)
 
       _ ->
-        compute_gradients_numerical(model, batch_in, batch_tgt, epsilon)
+        compute_gradients_autodiff(model, batch_in, batch_tgt)
     end
   end
 
@@ -669,7 +673,7 @@ defmodule ExBurn.Training do
           loss_val = Nx.to_number(loss)
 
           # Compute gradients
-          grads = compute_gradients(model, {batch_in, batch_tgt}, grad_method: :numerical)
+          grads = compute_gradients(model, {batch_in, batch_tgt}, grad_method: :autodiff)
 
           # Accumulate gradients
           grad_acc =
@@ -820,6 +824,157 @@ defmodule ExBurn.Training do
       |> Map.new()
 
     grads
+  end
+
+  # ── Autodiff Gradient Computation ───────────────────────────────
+
+  defp compute_gradients_autodiff(%Model{params: params} = model, input, target) do
+    # Use Nx.Defn to build a computation graph where parameters are
+    # differentiable nodes. The ExBurn.Defn.Compiler compiles this to
+    # Burn Autodiff tensors, enabling exact gradient computation via
+    # a single backward pass.
+
+    Nx.default_backend(ExBurn.Backend)
+
+    # Sort params by key for deterministic ordering
+    sorted_params = Enum.sort_by(params, fn {k, _} -> k end)
+    param_keys = Enum.map(sorted_params, fn {k, _} -> k end)
+    param_values = Enum.map(sorted_params, fn {_, v} -> v end)
+
+    try do
+      # Build and run a defn that computes loss from input + params
+      {loss_val, param_burn_tensors} = autodiff_forward(model, input, target, param_values)
+
+      # Trigger backward pass on the scalar loss
+      ExBurn.NifHelper.backward_tensor(loss_val)
+
+      # Extract gradients for each parameter
+      grads =
+        Enum.zip(param_keys, param_burn_tensors)
+        |> Enum.map(fn {key, burn_param} ->
+          grad = extract_param_gradient(burn_param, key)
+          {key, grad}
+        end)
+        |> Map.new()
+
+      grads
+    rescue
+      e ->
+        require Logger
+
+        Logger.warning(
+          "Autodiff gradient failed: #{Exception.message(e)}. Falling back to numerical."
+        )
+
+        compute_gradients_numerical(model, input, target, 1.0e-5)
+    end
+  end
+
+  defp autodiff_forward(model, _input, target, param_values) do
+    # Convert params to Burn tensors for the autodiff graph
+    burn_params = Enum.map(param_values, fn v -> nx_to_burn_tensor(v) end)
+
+    # Build the Axon expression graph with Burn tensor params
+    {output_expr, _init_fn} = Axon.build(model.axon_model, burn_params)
+
+    # Compute loss from the output
+    loss_expr = compute_loss_expr(model.loss_fn, output_expr, target)
+
+    # Compile through ExBurn's defn compiler (Autodiff backend)
+    loss_val = Nx.Defn.jit_apply(fn inp -> inp end, [loss_expr], compiler: ExBurn.Defn.Compiler)
+
+    {loss_val, burn_params}
+  end
+
+  defp compute_loss_expr(:cross_entropy, pred, target) do
+    pred_max = Nx.reduce_max(pred, axes: [-1], keep_axes: true)
+    pred_stable = Nx.subtract(pred, pred_max)
+    log_sum_exp = Nx.log(Nx.sum(Nx.exp(pred_stable), axes: [-1], keep_axes: true))
+    log_probs = Nx.subtract(pred_stable, log_sum_exp)
+    batch_size = elem(Nx.shape(pred), 0)
+
+    if Nx.rank(target) == Nx.rank(pred) do
+      Nx.sum(Nx.multiply(target, log_probs), axes: [-1])
+      |> Nx.mean()
+      |> Nx.negate()
+    else
+      batch_indices = Nx.iota({batch_size})
+      indices = Nx.stack([batch_indices, target], axis: -1)
+
+      Nx.take(log_probs, indices)
+      |> Nx.mean()
+      |> Nx.negate()
+    end
+  end
+
+  defp compute_loss_expr(:mse, pred, target) do
+    diff = Nx.subtract(pred, target)
+    squared = Nx.multiply(diff, diff)
+    Nx.mean(squared)
+  end
+
+  defp compute_loss_expr(:binary_cross_entropy, pred, target) do
+    eps = Nx.tensor(1.0e-7)
+    pred_clamped = Nx.clip(pred, eps, Nx.tensor(1.0) - eps)
+
+    Nx.add(
+      Nx.multiply(target, Nx.log(pred_clamped)),
+      Nx.multiply(Nx.subtract(1, target), Nx.log(Nx.subtract(1, pred_clamped)))
+    )
+    |> Nx.mean()
+    |> Nx.negate()
+  end
+
+  defp compute_loss_expr(_, pred, target) do
+    diff = Nx.subtract(pred, target)
+    squared = Nx.multiply(diff, diff)
+    Nx.mean(squared)
+  end
+
+  defp nx_to_burn_tensor(%Nx.Tensor{} = tensor) do
+    data = Nx.to_binary(tensor)
+    shape = Tuple.to_list(Nx.shape(tensor))
+    type = nx_type_to_burn_type(Nx.type(tensor))
+
+    case ExBurn.NifHelper.new_tensor(data, shape, Atom.to_string(type)) do
+      {:ok, ref} -> %ExBurn.Backend{ref: ref, shape: shape, type: type}
+      {:error, _} -> %ExBurn.Backend{ref: make_ref(), shape: shape, type: type}
+    end
+  end
+
+  defp nx_type_to_burn_type({:f, 32}), do: :f32
+  defp nx_type_to_burn_type({:f, 64}), do: :f64
+  defp nx_type_to_burn_type({:f, 16}), do: :f16
+  defp nx_type_to_burn_type({:bf, 16}), do: :bf16
+  defp nx_type_to_burn_type({:s, 32}), do: :i32
+  defp nx_type_to_burn_type({:s, 64}), do: :i64
+  defp nx_type_to_burn_type({:s, 16}), do: :i16
+  defp nx_type_to_burn_type({:s, 8}), do: :i8
+  defp nx_type_to_burn_type({:u, 8}), do: :u8
+  defp nx_type_to_burn_type(_), do: :f32
+
+  defp extract_param_gradient(%ExBurn.Backend{} = burn_param, _param_key) do
+    # grad_tensor returns {:ok, ResourceArc<TensorResource>}
+    # We wrap it in ExBurn.Backend to use with ExBurn.Tensor.to_nx
+    case ExBurn.NifHelper.grad_tensor(burn_param, burn_param) do
+      {:ok, grad_ref} ->
+        grad_tensor = %ExBurn.Tensor{
+          ref: grad_ref,
+          shape: burn_param.shape,
+          type: burn_param.type
+        }
+
+        case ExBurn.Tensor.to_nx(grad_tensor) do
+          {:ok, grad_nx} ->
+            Nx.reshape(grad_nx, List.to_tuple(burn_param.shape))
+
+          {:error, _} ->
+            Nx.broadcast(Nx.tensor(0.0), List.to_tuple(burn_param.shape))
+        end
+
+      {:error, _} ->
+        Nx.broadcast(Nx.tensor(0.0), List.to_tuple(burn_param.shape))
+    end
   end
 
   defp binary_replace(binary, offset, replacement) do

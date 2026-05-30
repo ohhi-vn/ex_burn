@@ -225,21 +225,29 @@ defmodule ExBurn.BurnBridge do
   end
 
   @spec dropout(BT.t(), float(), boolean()) :: BT.t()
-  def dropout(%BT{ref: ref, shape: shape, type: type}, _prob \\ 0.5, _training \\ true) do
-    %BT{ref: ref, shape: shape, type: type}
+  def dropout(%BT{ref: ref, shape: shape, type: type}, prob \\ 0.5, training \\ true) do
+    if training do
+      ref = ExBurn.Nif.dropout(ref, prob)
+      %BT{ref: ref, shape: shape, type: type}
+    else
+      %BT{ref: ref, shape: shape, type: type}
+    end
   end
 
   # ── Loss Functions ───────────────────────────────────────────────
 
   @spec cross_entropy(BT.t(), BT.t()) :: BT.t()
-  def cross_entropy(%BT{ref: ref_pred, type: type}, %BT{ref: _ref_target}) do
-    ref = ref_pred
+  def cross_entropy(%BT{ref: ref_pred, type: type}, %BT{ref: ref_target}) do
+    # Numerically stable cross-entropy via Burn operations
+    # log_softmax(pred) then negative log-likelihood
+    ref = ExBurn.Nif.cross_entropy_loss(ref_pred, ref_target)
     %BT{ref: ref, shape: [1], type: type}
   end
 
   @spec mse(BT.t(), BT.t()) :: BT.t()
-  def mse(%BT{ref: ref_pred, type: type}, %BT{ref: _ref_target}) do
-    ref = ref_pred
+  def mse(%BT{ref: ref_pred, type: type}, %BT{ref: ref_target}) do
+    # MSE = mean((pred - target)^2)
+    ref = ExBurn.Nif.mse_loss(ref_pred, ref_target)
     %BT{ref: ref, shape: [1], type: type}
   end
 

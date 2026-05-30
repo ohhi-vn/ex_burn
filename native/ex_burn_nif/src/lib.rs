@@ -13,9 +13,12 @@
 //! for CPU-only (NdArray).
 
 use rustler::ResourceArc;
+use std::cell::RefCell;
 use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::sync::OnceLock;
 
+use burn::prelude::ElementConversion;
+use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::Tensor;
 use burn_autodiff::Autodiff;
 #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
@@ -242,8 +245,22 @@ fn nif_new_tensor(data: Vec<u8>, shape: Vec<usize>, dtype: String) -> ResourceAr
 
 #[inline(never)]
 #[rustler::nif]
-fn nif_pow_tensor(a: ResourceArc<TensorResource>, _exp: f32) -> ResourceArc<TensorResource> {
-    build_resource(a.tensor.clone(), a.shape.clone(), a.dtype.clone())
+fn nif_pow_tensor(a: ResourceArc<TensorResource>, exp: f32) -> ResourceArc<TensorResource> {
+    // Create a scalar tensor with the exponent value, then use powf
+    let dev = device();
+    let result = match &a.tensor {
+        BurnTensor::F32x1(t) => {
+            let exp_tensor = Tensor::<B, 1>::from_floats([exp], &dev);
+            BurnTensor::F32x1(t.clone().powf(exp_tensor))
+        }
+        BurnTensor::F32x2(t) => {
+            let exp_tensor = Tensor::<B, 2>::from_floats([exp], &dev);
+            BurnTensor::F32x2(t.clone().powf(exp_tensor))
+        }
+        _ => panic!("pow_tensor only supports f32 1D/2D tensors"),
+    };
+    let (shape, dtype, _) = tensor_to_bytes(&result);
+    build_resource(result, shape, dtype)
 }
 
 #[inline(never)]
@@ -748,10 +765,121 @@ fn nif_softmax_tensor(a: ResourceArc<TensorResource>, dim: i64) -> ResourceArc<T
 #[rustler::nif]
 fn nif_layer_norm_tensor(
     a: ResourceArc<TensorResource>,
-    _dim: i64,
-    _eps: f64,
+    dim: i64,
+    eps: f64,
 ) -> ResourceArc<TensorResource> {
-    build_resource(a.tensor.clone(), a.shape.clone(), a.dtype.clone())
+    let eps = eps as f32;
+    let result = match &a.tensor {
+        BurnTensor::F32x2(t) => {
+            let norm_dim = if dim < 0 { 1_usize } else { dim as usize };
+            let mean = t.clone().mean_dim(norm_dim);
+            let shifted = t.clone() - mean;
+            let two = Tensor::<B, 2>::from_floats([2.0_f32], &device());
+            let var = shifted.clone().powf(two).mean_dim(norm_dim);
+            let normalized = shifted / (var + eps).sqrt();
+            BurnTensor::F32x2(normalized)
+        }
+        BurnTensor::F32x1(t) => {
+            let mean = t.clone().mean();
+            let shifted = t.clone() - mean;
+            let two = Tensor::<B, 1>::from_floats([2.0_f32], &device());
+            let var = shifted.clone().powf(two).mean();
+            let normalized = shifted / (var + eps).sqrt();
+            BurnTensor::F32x1(normalized)
+        }
+        _ => panic!("layer_norm only supports 1D/2D f32 tensors"),
+    };
+    let (shape, dtype, _) = tensor_to_bytes(&result);
+    build_resource(result, shape, dtype)
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// NIF init
+// ═══════════════════════════════════════════════════════════════════
+
+type GradientsType = <B as AutodiffBackend>::Gradients;
+
+thread_local! {
+    static LAST_GRADIENTS: RefCell<Option<GradientsType>> = RefCell::new(None);
+}
+
+// ── Autodiff / Backward ────────────────────────────────────────-
+
+/// Triggers backward pass on a scalar tensor and stores gradients
+/// in a thread-local for subsequent grad() calls.
+#[inline(never)]
+#[rustler::nif]
+fn nif_backward_tensor(a: ResourceArc<TensorResource>) -> rustler::Atom {
+    match &a.tensor {
+        BurnTensor::F32x1(t) => {
+            if a.shape.iter().product::<usize>() == 1 {
+                let grads = t.clone().backward();
+                LAST_GRADIENTS.with(|g| {
+                    *g.borrow_mut() = Some(grads);
+                });
+            }
+        }
+        _ => {}
+    }
+    rustler::types::atom::ok()
+}
+
+#[inline(never)]
+#[rustler::nif]
+fn nif_grad_tensor(
+    tensor: ResourceArc<TensorResource>,
+    _var: ResourceArc<TensorResource>,
+) -> ResourceArc<TensorResource> {
+    let grad_tensor = LAST_GRADIENTS.with(|grads_cell| {
+        let grads_ref = grads_cell.borrow();
+        let grads = grads_ref.as_ref();
+
+        match &tensor.tensor {
+            BurnTensor::F32x1(t) => match grads {
+                Some(g) => match t.grad(g) {
+                    Some(grad) => {
+                        let data = grad.to_data();
+                        let vals: Vec<f32> = data.into_vec().unwrap_or_default();
+                        let dev = device();
+                        BurnTensor::F32x1(Tensor::<B, 1>::from_floats(vals.as_slice(), &dev))
+                    }
+                    None => {
+                        let dev = device();
+                        let n: usize = tensor.shape.iter().product();
+                        BurnTensor::F32x1(Tensor::<B, 1>::zeros([n], &dev))
+                    }
+                },
+                None => {
+                    let dev = device();
+                    let n: usize = tensor.shape.iter().product();
+                    BurnTensor::F32x1(Tensor::<B, 1>::zeros([n], &dev))
+                }
+            },
+            BurnTensor::F32x2(t) => match grads {
+                Some(g) => match t.grad(g) {
+                    Some(grad) => {
+                        let data = grad.to_data();
+                        let vals: Vec<f32> = data.into_vec().unwrap_or_default();
+                        let dev = device();
+                        BurnTensor::F32x2(Tensor::<B, 2>::from_floats(vals.as_slice(), &dev))
+                    }
+                    None => {
+                        let dev = device();
+                        let n: usize = tensor.shape.iter().product();
+                        BurnTensor::F32x1(Tensor::<B, 1>::zeros([n], &dev))
+                    }
+                },
+                None => {
+                    let dev = device();
+                    let n: usize = tensor.shape.iter().product();
+                    BurnTensor::F32x1(Tensor::<B, 1>::zeros([n], &dev))
+                }
+            },
+            _ => panic!("grad_tensor only supports 1D/2D f32 tensors"),
+        }
+    });
+    let (shape, dtype, _) = tensor_to_bytes(&grad_tensor);
+    build_resource(grad_tensor, shape, dtype)
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -760,7 +888,131 @@ fn nif_layer_norm_tensor(
 
 rustler::init!("Elixir.ExBurn.Nif");
 
-#[no_mangle]
+// ── Loss Functions ──────────────────────────────────────────────
+
+#[inline(never)]
+#[rustler::nif]
+fn nif_cross_entropy_loss(
+    pred: ResourceArc<TensorResource>,
+    target: ResourceArc<TensorResource>,
+) -> ResourceArc<TensorResource> {
+    let result = match (&pred.tensor, &target.tensor) {
+        (BurnTensor::F32x2(logits), BurnTensor::F32x2(targets)) => {
+            let max_val = logits.clone().max_dim(1);
+            let shifted = logits.clone() - max_val;
+            let exp_vals = shifted.clone().exp();
+            let sum_exp = exp_vals.clone().sum_dim(1);
+            let log_sum_exp = sum_exp.log();
+            let log_probs = shifted - log_sum_exp;
+            let batch_size = log_probs.shape().dims::<2>()[0];
+            let nll = -(targets.clone() * log_probs).sum() / (batch_size as f32);
+            let dev = device();
+            BurnTensor::F32x1(Tensor::<B, 1>::from_floats(
+                [nll.into_scalar().elem::<f32>()],
+                &dev,
+            ))
+        }
+        (BurnTensor::F32x1(logits), BurnTensor::F32x1(targets)) => {
+            let max_val = logits.clone().max();
+            let shifted = logits.clone() - max_val;
+            let exp_vals = shifted.clone().exp();
+            let sum_exp = exp_vals.clone().sum();
+            let log_sum_exp = sum_exp.log();
+            let log_probs = shifted - log_sum_exp;
+            let nll = -(targets.clone() * log_probs).sum();
+            let dev = device();
+            BurnTensor::F32x1(Tensor::<B, 1>::from_floats(
+                [nll.into_scalar().elem::<f32>()],
+                &dev,
+            ))
+        }
+        _ => panic!("cross_entropy_loss: unsupported tensor shapes"),
+    };
+    let (shape, dtype, _) = tensor_to_bytes(&result);
+    build_resource(result, shape, dtype)
+}
+
+#[inline(never)]
+#[rustler::nif]
+fn nif_mse_loss(
+    pred: ResourceArc<TensorResource>,
+    target: ResourceArc<TensorResource>,
+) -> ResourceArc<TensorResource> {
+    let result = match (&pred.tensor, &target.tensor) {
+        (BurnTensor::F32x1(p), BurnTensor::F32x1(t)) => {
+            let diff = p.clone() - t.clone();
+            let squared = diff.clone() * diff;
+            let mse = squared.mean();
+            let dev = device();
+            BurnTensor::F32x1(Tensor::<B, 1>::from_floats(
+                [mse.into_scalar().elem::<f32>()],
+                &dev,
+            ))
+        }
+        (BurnTensor::F32x2(p), BurnTensor::F32x2(t)) => {
+            let diff = p.clone() - t.clone();
+            let squared = diff.clone() * diff;
+            let mse = squared.mean();
+            let dev = device();
+            BurnTensor::F32x1(Tensor::<B, 1>::from_floats(
+                [mse.into_scalar().elem::<f32>()],
+                &dev,
+            ))
+        }
+        _ => panic!("mse_loss: unsupported tensor shapes"),
+    };
+    let (shape, dtype, _) = tensor_to_bytes(&result);
+    build_resource(result, shape, dtype)
+}
+
+// ── Regularization ──────────────────────────────────────────────
+
+#[inline(never)]
+#[rustler::nif]
+fn nif_dropout(tensor: ResourceArc<TensorResource>, prob: f64) -> ResourceArc<TensorResource> {
+    let prob = prob as f32;
+    let scale = 1.0 / (1.0 - prob);
+    let dev = device();
+
+    let result = match &tensor.tensor {
+        BurnTensor::F32x2(t) => {
+            let dims = t.shape().dims::<2>();
+            let total = dims[0] * dims[1];
+            let vals: Vec<f32> = (0..total)
+                .map(|_| {
+                    let r: f32 = rand::random();
+                    if r > prob {
+                        scale
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            let mask = Tensor::<B, 2>::from_floats(vals.as_slice(), &dev);
+            BurnTensor::F32x2(t.clone() * mask)
+        }
+        BurnTensor::F32x1(t) => {
+            let dims = t.shape().dims::<1>();
+            let total = dims[0];
+            let vals: Vec<f32> = (0..total)
+                .map(|_| {
+                    let r: f32 = rand::random();
+                    if r > prob {
+                        scale
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            let mask = Tensor::<B, 1>::from_floats(vals.as_slice(), &dev);
+            BurnTensor::F32x1(t.clone() * mask)
+        }
+        _ => panic!("dropout: unsupported tensor type"),
+    };
+    let (shape, dtype, _) = tensor_to_bytes(&result);
+    build_resource(result, shape, dtype)
+}
+
 pub extern "C" fn debug_nif_count() -> i32 {
     rustler::codegen_runtime::inventory::iter::<rustler::Nif>()
         .into_iter()

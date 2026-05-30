@@ -40,6 +40,84 @@ defmodule ExBurn.BurnBridgeTest do
     end
   end
 
+  describe "loss functions" do
+    @tag :nif
+    test "cross_entropy returns scalar tensor" do
+      pred = ExBurn.BurnBridge.from_nx(Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
+      target = ExBurn.BurnBridge.from_nx(Nx.tensor([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]))
+      loss = ExBurn.BurnBridge.cross_entropy(pred, target)
+      assert ExBurn.Tensor.shape(loss) == [1]
+    end
+
+    @tag :nif
+    test "cross_entropy with 1D tensors" do
+      pred = ExBurn.BurnBridge.from_nx(Nx.tensor([1.0, 2.0, 3.0]))
+      target = ExBurn.BurnBridge.from_nx(Nx.tensor([0.0, 0.0, 1.0]))
+      loss = ExBurn.BurnBridge.cross_entropy(pred, target)
+      assert ExBurn.Tensor.shape(loss) == [1]
+    end
+
+    @tag :nif
+    test "mse returns scalar tensor" do
+      pred = ExBurn.BurnBridge.from_nx(Nx.tensor([1.0, 2.0, 3.0]))
+      target = ExBurn.BurnBridge.from_nx(Nx.tensor([1.0, 2.0, 3.0]))
+      loss = ExBurn.BurnBridge.mse(pred, target)
+      assert ExBurn.Tensor.shape(loss) == [1]
+    end
+
+    @tag :nif
+    test "mse with 2D tensors" do
+      pred = ExBurn.BurnBridge.from_nx(Nx.tensor([[1.0, 2.0], [3.0, 4.0]]))
+      target = ExBurn.BurnBridge.from_nx(Nx.tensor([[1.0, 2.0], [3.0, 4.0]]))
+      loss = ExBurn.BurnBridge.mse(pred, target)
+      assert ExBurn.Tensor.shape(loss) == [1]
+    end
+
+    @tag :nif
+    test "mse with different values returns positive loss" do
+      pred = ExBurn.BurnBridge.from_nx(Nx.tensor([1.0, 2.0, 3.0]))
+      target = ExBurn.BurnBridge.from_nx(Nx.tensor([4.0, 5.0, 6.0]))
+      loss = ExBurn.BurnBridge.mse(pred, target)
+      {:ok, nx_loss} = ExBurn.Tensor.to_nx(loss)
+      val = Nx.to_number(nx_loss)
+      assert val > 0.0
+    end
+  end
+
+  describe "dropout" do
+    @tag :nif
+    test "dropout during training modifies tensor" do
+      t = ExBurn.BurnBridge.from_nx(Nx.tensor([1.0, 2.0, 3.0, 4.0, 5.0]))
+      result = ExBurn.BurnBridge.dropout(t, 0.5, true)
+      assert ExBurn.Tensor.shape(result) == [5]
+    end
+
+    @tag :nif
+    test "dropout during inference is identity" do
+      t = ExBurn.BurnBridge.from_nx(Nx.tensor([1.0, 2.0, 3.0, 4.0, 5.0]))
+      result = ExBurn.BurnBridge.dropout(t, 0.5, false)
+      assert ExBurn.Tensor.shape(result) == [5]
+      # When not training, tensor should be unchanged
+      {:ok, original} = ExBurn.Tensor.to_nx(t)
+      {:ok, output} = ExBurn.Tensor.to_nx(result)
+      assert Nx.to_list(original) == Nx.to_list(output)
+    end
+
+    @tag :nif
+    test "dropout with 2D tensor" do
+      t = ExBurn.BurnBridge.from_nx(Nx.tensor([[1.0, 2.0], [3.0, 4.0]]))
+      result = ExBurn.BurnBridge.dropout(t, 0.3, true)
+      assert ExBurn.Tensor.shape(result) == [2, 2]
+    end
+
+    @tag :nif
+    test "dropout with zero probability" do
+      t = ExBurn.BurnBridge.from_nx(Nx.tensor([1.0, 2.0, 3.0]))
+      result = ExBurn.BurnBridge.dropout(t, 0.0, true)
+      assert ExBurn.Tensor.shape(result) == [3]
+    end
+  end
+
   describe "arithmetic operations" do
     @tag :nif
     test "add returns correct shape" do

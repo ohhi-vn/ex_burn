@@ -32,6 +32,9 @@ burn-ndarray = "=0.21.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.148"
 
+# Random number generation for dropout
+rand = "0.8"
+
 # Error handling
 thiserror = "1.0.64"
 

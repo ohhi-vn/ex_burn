@@ -134,7 +134,21 @@ defmodule ExBurn.NifHelper do
   # ── Neural Network ───────────────────────────────────────────────
 
   def softmax_tensor(a, dim), do: dispatch("softmax_tensor", [a, dim])
-  def layer_norm_tensor(a, _dim, _eps), do: dispatch("layer_norm_tensor", a)
+  def layer_norm_tensor(a, dim, eps), do: dispatch("layer_norm_tensor", [a, dim, eps])
+
+  # ── Autodiff ────────────────────────────────────────────────────
+
+  def backward_tensor(a), do: dispatch("backward_tensor", a)
+  def grad_tensor(tensor, var), do: dispatch("grad_tensor", [tensor, var])
+
+  # ── Loss Functions ──────────────────────────────────────────────
+
+  def cross_entropy_loss(pred, target), do: dispatch("cross_entropy_loss", [pred, target])
+  def mse_loss(pred, target), do: dispatch("mse_loss", [pred, target])
+
+  # ── Regularization ──────────────────────────────────────────────
+
+  def dropout(tensor, prob), do: dispatch("dropout", [tensor, prob])
 
   # ── Slicing ─────────────────────────────────────────────────────
 
@@ -177,7 +191,10 @@ defmodule ExBurn.NifHelper do
         end
 
       key = Nx.Random.key(System.os_time())
-      {tensor, _new_key} = Nx.Random.uniform(key, low, high, shape: List.to_tuple(shape), type: nx_type)
+
+      {tensor, _new_key} =
+        Nx.Random.uniform(key, low, high, shape: List.to_tuple(shape), type: nx_type)
+
       data = Nx.to_binary(tensor)
       new_tensor(data, shape, type)
     rescue

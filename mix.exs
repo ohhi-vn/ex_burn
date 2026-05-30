@@ -2,7 +2,7 @@ defmodule ExBurn.MixProject do
   use Mix.Project
 
   @app :ex_burn
-  @version "0.3.1"
+  @version "0.4.0"
   @github_url "https://github.com/ohhi-vn/ex_burn"
 
   def project do
@@ -12,7 +12,7 @@ defmodule ExBurn.MixProject do
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
-      description: "Middle layer between Nx and Burn for mobile ML training",
+      description: "Middle layer between Nx and Burn for ML training",
       package: package(),
       source_url: @github_url,
       docs: docs(),

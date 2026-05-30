@@ -123,7 +123,11 @@ Key functions:
 - `add_tensor/2`, `sub_tensor/2`, `mul_tensor/2`, `div_tensor/2` — arithmetic
 - `matmul_tensor/2` — matrix multiplication
 - `sum_tensor/1`, `mean_tensor/1` — reductions
-- `softmax_tensor/2`, `layer_norm_tensor/1` — neural network ops
+- `softmax_tensor/2`, `layer_norm_tensor/3` — neural network ops
+- `cross_entropy_loss/2`, `mse_loss/2` — loss functions
+- `dropout/2` — regularization
+- `backward_tensor/1` — autodiff backward pass
+- `grad_tensor/2` — gradient extraction
 - `gpu_available/0`, `device_name/0` — device queries
 - `to_gpu/1`, `to_cpu/1` — device transfer
 - `free_tensor/1` — explicit deallocation
@@ -188,7 +192,7 @@ This requires **2 forward passes per parameter**, making it slow for large model
 
 Where N = number of scalar parameters.
 
-### Planned: Burn Autodiff
+### Burn Autodiff (Default)
 
 ```
 Forward pass                    Backward pass
@@ -199,10 +203,19 @@ input → Linear → ReLU → output
               ↓
          backward(loss)  ← Autodiff<CubeCL> computes ∂L/∂W
               ↓
+         grad(param)     ← Extract ∂L/∂W for each parameter
+              ↓
          optimizer.step()  ← Adam/SGD updates W -= lr * ∂L/∂W
 ```
 
-Burn's Autodiff backend will compute exact gradients in a single backward pass, replacing numerical differentiation entirely.
+Burn's Autodiff backend computes exact gradients in a single backward pass. The Rust NIF uses `Autodiff<CubeCL>` tensors, so every forward-pass operation (add, mul, matmul, etc.) builds an autodiff computation graph. After the forward pass:
+
+1. `backward(loss)` propagates gradients through the graph
+2. `grad(param)` extracts the gradient for each parameter
+
+This is the **default** gradient method (`:autodiff`) and is significantly faster than numerical differentiation — O(1) forward+backward passes vs O(N) forward passes for N parameters.
+
+Numerical methods (`:numerical`, `:numerical_batch`) remain available as fallbacks.
 
 ## Training Loop Architecture
 

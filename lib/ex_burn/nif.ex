@@ -81,4 +81,13 @@ defmodule ExBurn.Nif do
 
   def softmax_tensor(_a, _dim), do: :erlang.nif_error(:nif_not_loaded)
   def layer_norm_tensor(_a, _dim, _eps), do: :erlang.nif_error(:nif_not_loaded)
+
+  # ── Loss Functions ──────────────────────────────────────────────
+
+  def cross_entropy_loss(_pred, _target), do: :erlang.nif_error(:nif_not_loaded)
+  def mse_loss(_pred, _target), do: :erlang.nif_error(:nif_not_loaded)
+
+  # ── Regularization ──────────────────────────────────────────────
+
+  def dropout(_tensor, _prob), do: :erlang.nif_error(:nif_not_loaded)
 end

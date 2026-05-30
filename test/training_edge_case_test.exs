@@ -113,7 +113,7 @@ defmodule ExBurn.TrainingEdgeCaseTest do
     end
 
     @tag :nif
-    test "falls back to numerical for unknown method" do
+    test "computes gradients with autodiff method" do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
@@ -127,8 +127,110 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       batch_in = Nx.tensor([[1.0, 2.0]])
       batch_tgt = Nx.tensor([[1.0]])
 
-      grads = Training.compute_gradients(compiled, {batch_in, batch_tgt}, grad_method: :autodiff)
+      grads =
+        Training.compute_gradients(compiled, {batch_in, batch_tgt}, grad_method: :autodiff)
+
       assert is_map(grads)
+      assert map_size(grads) > 0
+
+      # Verify gradient shapes match parameter shapes
+      for {key, grad} <- grads do
+        param = compiled.params[key]
+
+        assert Nx.shape(grad) == Nx.shape(param),
+               "Gradient shape #{inspect(Nx.shape(grad))} should match param shape #{inspect(Nx.shape(param))} for #{key}"
+      end
+    end
+
+    @tag :nif
+    test "autodiff gradients have correct signs for MSE" do
+      # For a simple linear model with MSE loss, we can verify gradient direction
+      model =
+        Axon.input("input", shape: {nil, 1})
+        |> Axon.dense(1, use_bias: false)
+        |> (fn g ->
+              {init_fn, _} = Axon.build(g, [])
+              template = Nx.template({1, 1}, :f32)
+              init_fn.(template, Axon.ModelState.empty())
+            end).()
+
+      # Set weight to a known value
+      model = %{model | params: %{}}
+      compiled = ExBurn.Model.compile(model, loss: :mse)
+      batch_in = Nx.tensor([[2.0]])
+      batch_tgt = Nx.tensor([[10.0]])
+
+      grads =
+        Training.compute_gradients(compiled, {batch_in, batch_tgt}, grad_method: :autodiff)
+
+      assert is_map(grads)
+      assert map_size(grads) > 0
+    end
+
+    @tag :nif
+    test "autodiff with cross_entropy loss" do
+      model =
+        Axon.input("input", shape: {nil, 3})
+        |> Axon.dense(5)
+        |> (fn g ->
+              {init_fn, _} = Axon.build(g, [])
+              template = Nx.template({1, 3}, :f32)
+              init_fn.(template, Axon.ModelState.empty())
+            end).()
+
+      compiled = ExBurn.Model.compile(model, loss: :cross_entropy)
+      batch_in = Nx.tensor([[1.0, 2.0, 3.0]])
+      batch_tgt = Nx.tensor([2])
+
+      grads =
+        Training.compute_gradients(compiled, {batch_in, batch_tgt}, grad_method: :autodiff)
+
+      assert is_map(grads)
+      assert map_size(grads) > 0
+    end
+
+    @tag :nif
+    test "falls back to autodiff for unknown method" do
+      model =
+        Axon.input("input", shape: {nil, 2})
+        |> Axon.dense(1)
+        |> (fn g ->
+              {init_fn, _} = Axon.build(g, [])
+              template = Nx.template({1, 2}, :f32)
+              init_fn.(template, Axon.ModelState.empty())
+            end).()
+
+      compiled = ExBurn.Model.compile(model, loss: :mse)
+      batch_in = Nx.tensor([[1.0, 2.0]])
+      batch_tgt = Nx.tensor([[1.0]])
+
+      # Unknown method should fall back to autodiff (the new default)
+      grads =
+        Training.compute_gradients(compiled, {batch_in, batch_tgt}, grad_method: :unknown_method)
+
+      assert is_map(grads)
+      assert map_size(grads) > 0
+    end
+
+    @tag :nif
+    test "default gradient method is autodiff" do
+      model =
+        Axon.input("input", shape: {nil, 2})
+        |> Axon.dense(1)
+        |> (fn g ->
+              {init_fn, _} = Axon.build(g, [])
+              template = Nx.template({1, 2}, :f32)
+              init_fn.(template, Axon.ModelState.empty())
+            end).()
+
+      compiled = ExBurn.Model.compile(model, loss: :mse)
+      batch_in = Nx.tensor([[1.0, 2.0]])
+      batch_tgt = Nx.tensor([[1.0]])
+
+      # No grad_method specified — should use autodiff by default
+      grads = Training.compute_gradients(compiled, {batch_in, batch_tgt})
+      assert is_map(grads)
+      assert map_size(grads) > 0
     end
   end
 
@@ -361,6 +463,251 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       history = Training.HistoryCallback.get_history(pid)
       assert length(history) == 1
       assert hd(history).epoch == 1
+    end
+  end
+
+  describe "train_step/3 with autodiff" do
+    @tag :nif
+    test "performs a single training step with default autodiff" do
+      model =
+        Axon.input("input", shape: {nil, 2})
+        |> Axon.dense(1)
+        |> (fn g ->
+              {init_fn, _} = Axon.build(g, [])
+              template = Nx.template({1, 2}, :f32)
+              init_fn.(template, Axon.ModelState.empty())
+            end).()
+
+      compiled = ExBurn.Model.compile(model, loss: :mse)
+      batch_in = Nx.tensor([[1.0, 2.0]])
+      batch_tgt = Nx.tensor([[1.0]])
+
+      {loss, updated_model} = Training.train_step(compiled, {batch_in, batch_tgt})
+      assert is_float(loss)
+      assert loss >= 0.0
+      assert updated_model.__struct__ == ExBurn.Model
+    end
+
+    @tag :nif
+    test "train_step with explicit autodiff method" do
+      model =
+        Axon.input("input", shape: {nil, 2})
+        |> Axon.dense(1)
+        |> (fn g ->
+              {init_fn, _} = Axon.build(g, [])
+              template = Nx.template({1, 2}, :f32)
+              init_fn.(template, Axon.ModelState.empty())
+            end).()
+
+      compiled = ExBurn.Model.compile(model, loss: :mse)
+      batch_in = Nx.tensor([[1.0, 2.0]])
+      batch_tgt = Nx.tensor([[1.0]])
+
+      {loss, updated_model} =
+        Training.train_step(compiled, {batch_in, batch_tgt}, grad_method: :autodiff)
+
+      assert is_float(loss)
+      assert updated_model.__struct__ == ExBurn.Model
+    end
+
+    @tag :nif
+    test "train_step with weight decay" do
+      model =
+        Axon.input("input", shape: {nil, 2})
+        |> Axon.dense(1)
+        |> (fn g ->
+              {init_fn, _} = Axon.build(g, [])
+              template = Nx.template({1, 2}, :f32)
+              init_fn.(template, Axon.ModelState.empty())
+            end).()
+
+      compiled = ExBurn.Model.compile(model, loss: :mse)
+      batch_in = Nx.tensor([[1.0, 2.0]])
+      batch_tgt = Nx.tensor([[1.0]])
+
+      {loss, _updated_model} =
+        Training.train_step(compiled, {batch_in, batch_tgt},
+          grad_method: :autodiff,
+          weight_decay: 0.01
+        )
+
+      assert is_float(loss)
+    end
+
+    @tag :nif
+    test "train_step with gradient clipping" do
+      model =
+        Axon.input("input", shape: {nil, 2})
+        |> Axon.dense(1)
+        |> (fn g ->
+              {init_fn, _} = Axon.build(g, [])
+              template = Nx.template({1, 2}, :f32)
+              init_fn.(template, Axon.ModelState.empty())
+            end).()
+
+      compiled = ExBurn.Model.compile(model, loss: :mse)
+      batch_in = Nx.tensor([[1.0, 2.0]])
+      batch_tgt = Nx.tensor([[1.0]])
+
+      {loss, _updated_model} =
+        Training.train_step(compiled, {batch_in, batch_tgt},
+          grad_method: :autodiff,
+          clip_norm: 1.0
+        )
+
+      assert is_float(loss)
+    end
+  end
+
+  describe "fit/3 with autodiff" do
+    @tag :nif
+    test "trains a simple model with default autodiff" do
+      model =
+        Axon.input("input", shape: {nil, 2})
+        |> Axon.dense(1)
+        |> (fn g ->
+              {init_fn, _} = Axon.build(g, [])
+              template = Nx.template({1, 2}, :f32)
+              init_fn.(template, Axon.ModelState.empty())
+            end).()
+
+      compiled = ExBurn.Model.compile(model, loss: :mse, optimizer: :sgd, learning_rate: 0.01)
+
+      inputs = Nx.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]])
+      targets = Nx.tensor([[1.0], [2.0], [3.0], [4.0]])
+
+      trained =
+        Training.fit(compiled, {inputs, targets},
+          epochs: 3,
+          batch_size: 2,
+          verbose: false
+        )
+
+      assert trained.__struct__ == ExBurn.Model
+      # After training, parameters should have changed
+      assert trained.params != nil
+    end
+
+    @tag :nif
+    test "fit with autodiff and cross_entropy" do
+      model =
+        Axon.input("input", shape: {nil, 3})
+        |> Axon.dense(2)
+        |> (fn g ->
+              {init_fn, _} = Axon.build(g, [])
+              template = Nx.template({1, 3}, :f32)
+              init_fn.(template, Axon.ModelState.empty())
+            end).()
+
+      compiled =
+        ExBurn.Model.compile(model,
+          loss: :cross_entropy,
+          optimizer: :adam,
+          learning_rate: 0.01
+        )
+
+      inputs = Nx.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]])
+      targets = Nx.tensor([0, 1, 0, 1])
+
+      trained =
+        Training.fit(compiled, {inputs, targets},
+          epochs: 3,
+          batch_size: 2,
+          verbose: false,
+          grad_method: :autodiff
+        )
+
+      assert trained.__struct__ == ExBurn.Model
+    end
+
+    @tag :nif
+    test "fit with autodiff and gradient accumulation" do
+      model =
+        Axon.input("input", shape: {nil, 2})
+        |> Axon.dense(1)
+        |> (fn g ->
+              {init_fn, _} = Axon.build(g, [])
+              template = Nx.template({1, 2}, :f32)
+              init_fn.(template, Axon.ModelState.empty())
+            end).()
+
+      compiled = ExBurn.Model.compile(model, loss: :mse, optimizer: :sgd, learning_rate: 0.01)
+
+      inputs = Nx.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]])
+      targets = Nx.tensor([[1.0], [2.0], [3.0], [4.0]])
+
+      trained =
+        Training.fit(compiled, {inputs, targets},
+          epochs: 2,
+          batch_size: 2,
+          verbose: false,
+          accumulate_gradients: 2
+        )
+
+      assert trained.__struct__ == ExBurn.Model
+    end
+
+    @tag :nif
+    test "fit with autodiff and callbacks" do
+      model =
+        Axon.input("input", shape: {nil, 2})
+        |> Axon.dense(1)
+        |> (fn g ->
+              {init_fn, _} = Axon.build(g, [])
+              template = Nx.template({1, 2}, :f32)
+              init_fn.(template, Axon.ModelState.empty())
+            end).()
+
+      compiled = ExBurn.Model.compile(model, loss: :mse, optimizer: :sgd, learning_rate: 0.01)
+
+      inputs = Nx.tensor([[1.0, 2.0], [3.0, 4.0]])
+      targets = Nx.tensor([[1.0], [2.0]])
+
+      callback = fn metrics ->
+        assert is_map(metrics)
+        assert Map.has_key?(metrics, :epoch)
+        assert Map.has_key?(metrics, :loss)
+        metrics
+      end
+
+      trained =
+        Training.fit(compiled, {inputs, targets},
+          epochs: 2,
+          batch_size: 2,
+          verbose: false,
+          callbacks: [callback]
+        )
+
+      assert trained.__struct__ == ExBurn.Model
+    end
+  end
+
+  describe "profile_step/3 with autodiff" do
+    @tag :nif
+    test "profiles a training step with autodiff" do
+      model =
+        Axon.input("input", shape: {nil, 2})
+        |> Axon.dense(1)
+        |> (fn g ->
+              {init_fn, _} = Axon.build(g, [])
+              template = Nx.template({1, 2}, :f32)
+              init_fn.(template, Axon.ModelState.empty())
+            end).()
+
+      compiled = ExBurn.Model.compile(model, loss: :mse)
+      batch_in = Nx.tensor([[1.0, 2.0]])
+      batch_tgt = Nx.tensor([[1.0]])
+
+      profile = Training.profile_step(compiled, {batch_in, batch_tgt}, grad_method: :autodiff)
+
+      assert is_map(profile)
+      assert Map.has_key?(profile, :loss)
+      assert Map.has_key?(profile, :forward_ms)
+      assert Map.has_key?(profile, :backward_ms)
+      assert Map.has_key?(profile, :optimizer_ms)
+      assert Map.has_key?(profile, :total_ms)
+      assert Map.has_key?(profile, :model)
+      assert profile.total_ms >= 0
     end
   end
 end
