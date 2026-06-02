@@ -58,10 +58,21 @@ defmodule ExBurn.BurnBridge do
 
   @doc "Creates a random tensor with uniform distribution."
   @spec rand([non_neg_integer()], BT.type(), float(), float()) :: BT.t()
-  def rand(shape, type \\ :f32, _low \\ 0.0, _high \\ 1.0) do
-    ref = ExBurn.Nif.zeros_tensor(shape, Atom.to_string(type))
+  def rand(shape, type \\ :f32, low \\ 0.0, high \\ 1.0) do
+    # Use Nx to generate random values, then convert to Burn tensor
+    nx_type = burn_type_to_nx_type(type)
+    key = Nx.Random.key(System.os_time())
+    {nx_tensor, _} = Nx.Random.uniform(key, low, high, shape: List.to_tuple(shape), type: nx_type)
+    data = Nx.to_binary(nx_tensor)
+    ref = ExBurn.Nif.new_tensor(data, shape, Atom.to_string(type))
     %BT{ref: ref, shape: shape, type: type}
   end
+
+  defp burn_type_to_nx_type(:f32), do: {:f, 32}
+  defp burn_type_to_nx_type(:f64), do: {:f, 64}
+  defp burn_type_to_nx_type(:i32), do: {:s, 32}
+  defp burn_type_to_nx_type(:i64), do: {:s, 64}
+  defp burn_type_to_nx_type(_), do: {:f, 32}
 
   @doc "Creates a GPU buffer via ExCubecl from a list of values."
   @spec buffer(list(), [non_neg_integer()], atom()) :: ExCubecl.buffer_ref()
@@ -185,9 +196,26 @@ defmodule ExBurn.BurnBridge do
 
   @spec transpose(BT.t(), non_neg_integer(), non_neg_integer()) :: BT.t()
   def transpose(%BT{ref: ref, shape: shape, type: type}, dim0 \\ 0, dim1 \\ 1) do
-    ref = ExBurn.Nif.transpose_tensor(ref)
-    new_shape = swap(shape, dim0, dim1)
-    %BT{ref: ref, shape: new_shape, type: type}
+    # The NIF transpose_tensor only supports 2D (swap dims 0 and 1).
+    # For the general case, we convert to Nx, transpose, and convert back.
+    if dim0 == 0 and dim1 == 1 do
+      ref = ExBurn.Nif.transpose_tensor(ref)
+      new_shape = swap(shape, dim0, dim1)
+      %BT{ref: ref, shape: new_shape, type: type}
+    else
+      # General case: use Nx transpose
+      nx_type = burn_type_to_nx_type(type)
+
+      nx_tensor =
+        Nx.from_binary(ExBurn.Nif.tensor_to_binary(ref), nx_type)
+        |> Nx.reshape(List.to_tuple(shape))
+
+      transposed = Nx.transpose(nx_tensor, axes: [dim0, dim1])
+      data = Nx.to_binary(transposed)
+      new_shape = Tuple.to_list(Nx.shape(transposed))
+      new_ref = ExBurn.Nif.new_tensor(data, new_shape, Atom.to_string(type))
+      %BT{ref: new_ref, shape: new_shape, type: type}
+    end
   end
 
   # ── Reductions ───────────────────────────────────────────────────
@@ -219,8 +247,8 @@ defmodule ExBurn.BurnBridge do
   end
 
   @spec layer_norm(BT.t(), non_neg_integer(), float()) :: BT.t()
-  def layer_norm(%BT{ref: ref, shape: shape, type: type}, _dim \\ -1, _eps \\ 1.0e-5) do
-    ref = ExBurn.Nif.layer_norm_tensor(ref, 0, 0.0)
+  def layer_norm(%BT{ref: ref, shape: shape, type: type}, dim \\ -1, eps \\ 1.0e-5) do
+    ref = ExBurn.Nif.layer_norm_tensor(ref, dim, eps)
     %BT{ref: ref, shape: shape, type: type}
   end
 

@@ -155,10 +155,13 @@ defmodule ExBurn.Model do
   end
 
   def predict(%__MODULE__{axon_model: model, params: params}, %Nx.Tensor{} = input) do
-    case Axon.predict(model, params, input) do
-      {:ok, output} -> {:ok, output}
-      {:error, reason} -> {:error, reason}
-    end
+    # Axon.build/2 works with both %Axon{} and %Axon.ModelState{}.
+    # It returns {init_fn, predict_fn} where predict_fn takes {params, input}.
+    {_init_fn, predict_fn} = Axon.build(model, params)
+    output = predict_fn.(params, input)
+    {:ok, output}
+  rescue
+    e -> {:error, "Predict failed: #{Exception.message(e)}"}
   end
 
   # ── Loss Computation ─────────────────────────────────────────────
@@ -467,6 +470,7 @@ defmodule ExBurn.Model do
     """
 
     device_name = ExBurn.BurnBridge.device_name()
+
     device_info =
       "  Device: #{if axon_model, do: "Axon model", else: "N/A"} | Backend: ExBurn (#{device_name})\n"
 
@@ -602,7 +606,7 @@ defmodule ExBurn.Model do
     min = Enum.min(times_ms)
     max = Enum.max(times_ms)
     median = times_ms |> Enum.sort() |> Enum.at(div(length(times_ms), 2))
-    variance = Enum.sum(Enum.map(times_ms, &(&1 - avg) * (&1 - avg))) / length(times_ms)
+    variance = Enum.sum(Enum.map(times_ms, &((&1 - avg) * (&1 - avg)))) / length(times_ms)
     std = :math.sqrt(variance)
 
     %{
@@ -629,8 +633,11 @@ defmodule ExBurn.Model do
   def clone(%__MODULE__{} = model) do
     cloned_params =
       Enum.map(model.params, fn
-        {key, %Nx.Tensor{} = tensor} -> {key, Nx.tensor(Nx.to_list(tensor), type: Nx.type(tensor))}
-        {key, value} -> {key, value}
+        {key, %Nx.Tensor{} = tensor} ->
+          {key, Nx.tensor(Nx.to_list(tensor), type: Nx.type(tensor))}
+
+        {key, value} ->
+          {key, value}
       end)
       |> Map.new()
 
@@ -700,11 +707,12 @@ defmodule ExBurn.Model do
         json_data =
           Enum.map(params, fn
             {key, %Nx.Tensor{} = tensor} ->
-              {key, %{
-                "shape" => Tuple.to_list(Nx.shape(tensor)),
-                "type" => Atom.to_string(Nx.type(tensor)),
-                "data" => Nx.to_list(tensor)
-              }}
+              {key,
+               %{
+                 "shape" => Tuple.to_list(Nx.shape(tensor)),
+                 "type" => Atom.to_string(Nx.type(tensor)),
+                 "data" => Nx.to_list(tensor)
+               }}
 
             {key, value} ->
               {key, inspect(value)}
@@ -742,7 +750,7 @@ defmodule ExBurn.Model do
                 {:ok, json_map} ->
                   Enum.map(json_map, fn
                     {key, %{"shape" => shape, "type" => type_str, "data" => data}} ->
-                      nx_type = String.to_atom(type_str)
+                      nx_type = parse_nx_type(type_str)
                       tensor = Nx.tensor(data, type: nx_type) |> Nx.reshape(List.to_tuple(shape))
                       {key, tensor}
 
@@ -752,7 +760,9 @@ defmodule ExBurn.Model do
                   |> Map.new()
 
                 {:error, reason} ->
-                  raise ExBurn.Error, op: :import_params, reason: "Invalid JSON: #{inspect(reason)}"
+                  raise ExBurn.Error,
+                    op: :import_params,
+                    reason: "Invalid JSON: #{inspect(reason)}"
               end
           end
 
@@ -763,39 +773,16 @@ defmodule ExBurn.Model do
     end
   end
 
-
   # ── Private Functions ────────────────────────────────────────────
 
-  # Forward pass using the ExBurn defn compiler.
-  # Builds the Axon expression graph with params bound, then wraps
-  # the input in a defn that JIT-compiles through ExBurn.Defn.Compiler.
+  # Forward pass using Axon.build/2.
+  # Axon.build/2 works with both %Axon{} and %Axon.ModelState{}.
+  # It returns {init_fn, predict_fn} where predict_fn takes {params, input}.
   defp axon_forward(axon_model, params, %Nx.Tensor{} = input) do
-    # Build the expression graph with params already bound.
-    # Axon.build returns {output_expr, init_fn} where output_expr
-    # is an Nx expression that takes the input tensor.
-    {output_expr, _init_fn} = Axon.build(axon_model, params)
-
-    # The output_expr is a defn expression referencing the input.
-    # We use Nx.Defn.jit_apply to compile it through ExBurn.Defn.Compiler
-    # for GPU execution.
-    case output_expr do
-      %Nx.Tensor{data: %Nx.Defn.Expr{}} ->
-        # It's a defn expression — compile through ExBurn
-        Nx.Defn.jit_apply(
-          fn inp -> inp end,
-          [output_expr],
-          compiler: ExBurn.Defn.Compiler
-        )
-
-      %Nx.Tensor{} ->
-        # Already a concrete tensor — run through Axon.predict as fallback
-        {output, _} = Axon.predict(axon_model, params, input)
-        output
-
-      other ->
-        # Fallback: try to evaluate as-is
-        other
-    end
+    {_init_fn, predict_fn} = Axon.build(axon_model, params)
+    predict_fn.(params, input)
+  rescue
+    e -> raise ExBurn.Error, op: :forward, reason: Exception.message(e)
   end
 
   # ── Parameter Initialization ──────────────────────────────────────
@@ -1010,6 +997,19 @@ defmodule ExBurn.Model do
       true -> :unknown
     end
   end
+
+  # ── JSON Import Helpers ─────────────────────────────────────────
+
+  defp parse_nx_type("f32"), do: {:f, 32}
+  defp parse_nx_type("f64"), do: {:f, 64}
+  defp parse_nx_type("f16"), do: {:f, 16}
+  defp parse_nx_type("bf16"), do: {:bf, 16}
+  defp parse_nx_type("s32"), do: {:s, 32}
+  defp parse_nx_type("s64"), do: {:s, 64}
+  defp parse_nx_type("s16"), do: {:s, 16}
+  defp parse_nx_type("s8"), do: {:s, 8}
+  defp parse_nx_type("u8"), do: {:u, 8}
+  defp parse_nx_type(_), do: {:f, 32}
 
   defp format_param_count(count) when count > 1_000_000 do
     "#{:erlang.float_to_binary(count / 1_000_000, decimals: 2)}M"

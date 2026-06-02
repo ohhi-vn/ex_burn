@@ -1,4 +1,8 @@
-ExUnit.start(exclude: [:nif, :cuda, :metal, :vulkan])
+nif_loaded? =
+  match?({:module, _}, Code.ensure_loaded(ExBurn.Nif)) and
+    function_exported?(ExBurn.Nif, :new_tensor, 3)
+
+ExUnit.start(exclude: [:cuda, :metal, :vulkan] ++ if(nif_loaded?, do: [], else: [:nif]))
 
 # Shared test fixtures
 defmodule ExBurn.TestFixtures do

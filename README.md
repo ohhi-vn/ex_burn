@@ -180,7 +180,48 @@ mix run examples/linear_regression.exs
 
 # MNIST-like classifier (full deep learning pipeline)
 mix run examples/mnist_simple.exs
+
+# XOR classifier (non-linear problem, early stopping, model summary)
+mix run examples/xor_classifier.exs
+
+# Dataset utilities (split, normalize, one-hot, data loaders)
+mix run examples/dataset_utils.exs
+
+# BurnBridge direct tensor operations (arithmetic, math, linear algebra)
+mix run examples/burn_bridge_ops.exs
+
+# Model management (save/load, quantize, freeze, benchmark, export)
+mix run examples/model_management.exs
+
+# Training callbacks (logging, early stopping, checkpoint, LR scheduling)
+mix run examples/training_callbacks.exs
 ```
+
+## Benchmarks
+
+Benchmark scripts in `bench/` compare ExBurn (Burn GPU backend) against plain Nx (BinaryBackend) across tensor sizes from 10×10 to 2000×2000.
+
+```bash
+# Tensor creation (zeros, ones, rand)
+mix run bench/tensor_creation_bench.exs
+
+# Element-wise arithmetic (add, mul, exp)
+mix run bench/arithmetic_bench.exs
+
+# Linear algebra (matmul, transpose)
+mix run bench/linear_algebra_bench.exs
+
+# Nx <-> Burn tensor conversion overhead
+mix run bench/conversion_bench.exs
+
+# End-to-end training (small/medium MLPs, optimizer comparison)
+mix run bench/training_bench.exs
+
+# Inference latency and throughput (single + batched + Nx.Serving)
+mix run bench/serving_bench.exs
+```
+
+Each script prints a formatted table with timing results. All benchmarks include warmup runs and report averaged measurements.
 
 ## Guides
 
@@ -189,6 +230,7 @@ mix run examples/mnist_simple.exs
 - [Mobile Deployment](guides/03_mobile_deployment.md) — iOS/Android compilation, optimization
 - [Architecture](guides/04_architecture.md) — Deep-dive into the pipeline
 - [Training Optimization](guides/05_training_optimization.md) — Best practices for fast, stable training
+- [Benchmarks](guides/07_benchmarks.md) — Performance benchmarks and how to run them
 
 ## Project Structure
 
@@ -212,6 +254,19 @@ native/ex_burn_nif/
 examples/
   linear_regression.exs  — Simplest ML workflow
   mnist_simple.exs        — Full deep learning pipeline
+  xor_classifier.exs      — Non-linear classification with early stopping
+  dataset_utils.exs       — Data preprocessing utilities
+  burn_bridge_ops.exs     — Direct Burn tensor operations
+  model_management.exs    — Save/load, quantize, freeze, benchmark
+  training_callbacks.exs  — All callback types + custom callbacks
+
+bench/
+  tensor_creation_bench.exs   — zeros/ones/rand: Nx vs Burn
+  arithmetic_bench.exs       — add/mul/exp: Nx vs Burn
+  linear_algebra_bench.exs   — matmul/transpose: Nx vs Burn
+  conversion_bench.exs       — Nx<->Burn conversion overhead
+  training_bench.exs         — End-to-end training performance
+  serving_bench.exs          — Inference latency & throughput
 
 guides/
   01_getting_started.md   — Installation, basic ops, GPU check

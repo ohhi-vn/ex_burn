@@ -1112,21 +1112,14 @@ defmodule ExBurn.Backend do
 
   @impl true
   @spec pad(Nx.Tensor.t(), t(), t(), [{non_neg_integer(), non_neg_integer()}]) :: t()
-  def pad(_out, %__MODULE__{} = a, _pad_value, padding_config) do
-    a = maybe_cast(a, :f32)
-    current_shape = a.shape
-
-    out_shape =
-      current_shape
-      |> Enum.with_index()
-      |> Enum.map(fn {dim, idx} ->
-        {pad_before, pad_after} = Enum.at(padding_config, idx, {0, 0})
-        dim + pad_before + pad_after
-      end)
-
-    with {:ok, ref} <- Nif.broadcast_tensor(a.ref, out_shape),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
+  def pad(_out, %__MODULE__{} = a, pad_value, padding_config) do
+    # Convert to Nx, pad using Nx.pad/3, then convert back.
+    # Nx.pad handles arbitrary padding configurations correctly.
+    with {:ok, nx_a} <- to_nx(a),
+         {:ok, nx_pad_val} <- to_nx(maybe_cast(pad_value, :f32)),
+         result = Nx.pad(nx_a, nx_pad_val, padding_config),
+         {:ok, bt} <- from_nx(result) do
+      bt
     else
       {:error, reason} -> raise Error, op: :pad, reason: reason
     end
@@ -1152,17 +1145,21 @@ defmodule ExBurn.Backend do
 
   @impl true
   @spec concatenate(Nx.Tensor.t(), [t()], non_neg_integer()) :: t()
-  def concatenate(_out, [%__MODULE__{} = first | rest], axis) when is_list(rest) do
+  def concatenate(_out, [%__MODULE__{} = first | rest], _axis) when is_list(rest) do
     all = [first | rest]
     all_f32 = Enum.map(all, &maybe_cast(&1, :f32))
-    refs = Enum.map(all_f32, & &1.ref)
 
-    with {:ok, ref} <- Nif.concat_tensor(refs, axis),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
-    else
-      {:error, reason} -> raise Error, op: :concatenate, reason: reason
-    end
+    result =
+      Enum.reduce(all_f32, fn b, a ->
+        with {:ok, ref} <- Nif.concat_tensor(a.ref, b.ref),
+             {:ok, shape} <- Nif.tensor_shape(ref) do
+          %__MODULE__{ref: ref, shape: shape, type: :f32}
+        else
+          {:error, reason} -> raise Error, op: :concatenate, reason: reason
+        end
+      end)
+
+    result
   end
 
   @impl true
@@ -1241,13 +1238,13 @@ defmodule ExBurn.Backend do
     mean = opts[:mean] || 0.0
     std = opts[:std] || 1.0
 
-    with {:ok, ref} <-
-           ExBurn.NifHelper.random_tensor(shape, "f32", mean - 2 * std, mean + 2 * std),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
-    else
-      {:error, reason} ->
-        raise Error, op: :random_normal, reason: reason
+    # Use Nx.Random.normal for proper normal distribution
+    key = Nx.Random.key(System.os_time())
+    {nx_tensor, _} = Nx.Random.normal(key, mean, std, shape: List.to_tuple(shape), type: {:f, 32})
+
+    case from_nx(nx_tensor) do
+      {:ok, bt} -> bt
+      {:error, reason} -> raise Error, op: :random_normal, reason: reason
     end
   end
 
@@ -1379,14 +1376,16 @@ defmodule ExBurn.Backend do
 
   @impl true
   @spec reduce(Nx.Tensor.t(), t(), t(), keyword(), fun()) :: t()
-  def reduce(out, %__MODULE__{} = tensor, _acc, opts, _fun) do
+  def reduce(out, %__MODULE__{} = tensor, _acc, opts, fun) do
     axes = opts[:axes] || []
 
     if axes == [] do
-      result = apply_reduce_fun(tensor)
+      # Full reduction: apply the reduction function, then reshape to output
+      result = apply_reduce_fun(tensor, fun)
       reshape(out, result)
     else
-      apply_reduce_fun(tensor)
+      # Partial reduction over specific axes
+      apply_reduce_fun(tensor, fun)
     end
   end
 
@@ -1545,12 +1544,16 @@ defmodule ExBurn.Backend do
 
   # ── Private Helpers ──────────────────────────────────────────────
 
-  @spec apply_reduce_fun(t()) :: t()
-  defp apply_reduce_fun(%__MODULE__{} = tensor) do
-    # Default reduction: sum over all axes
-    with {:ok, ref} <- Nif.sum_tensor(tensor.ref),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
+  @spec apply_reduce_fun(t(), fun()) :: t()
+  defp apply_reduce_fun(%__MODULE__{} = tensor, fun) do
+    # Apply the reduction function from the Nx.Backend callback.
+    # The fun receives {output_template, input_tensor} and should
+    # return a reduced tensor. We convert to Nx, apply, and convert back.
+    with {:ok, nx_tensor} <- to_nx(tensor) do
+      # Build an output template with the same shape for the reduction
+      out_template = Nx.tensor(0.0, type: {:f, 32})
+      result = fun.(out_template, nx_tensor)
+      from_nx(result)
     else
       {:error, _} -> tensor
     end

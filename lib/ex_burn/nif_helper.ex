@@ -92,16 +92,15 @@ defmodule ExBurn.NifHelper do
   # ── Device Management ────────────────────────────────────────────
 
   def gpu_available do
-    try do
+    if Code.ensure_loaded?(ExCubecl) and function_exported?(ExCubecl, :available?, 0) do
       ExCubecl.available?()
-    rescue
-      _ ->
-        # Fallback to NIF check if ExCubecl not available
-        try do
-          ExBurn.Nif.gpu_available()
-        rescue
-          _ -> false
-        end
+    else
+      # ExCubecl not available — fall back to NIF check
+      try do
+        ExBurn.Nif.gpu_available()
+      rescue
+        _ -> false
+      end
     end
   end
 
