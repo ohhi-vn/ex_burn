@@ -134,7 +134,7 @@ Key functions:
 
 ### 6. ExCubecl Integration
 
-ExBurn uses [ExCubecl](https://hex.pm/packages/ex_cubecl) v0.4+ as its GPU compute runtime:
+ExBurn uses [ExCubecl](https://hex.pm/packages/ex_cubecl) v0.5+ as its GPU compute runtime:
 
 - **GPU Buffers**: `ExCubecl.buffer/3` creates GPU-resident buffers with automatic GC
 - **Kernel Execution**: `ExCubecl.run_kernel/4` dispatches CubeCL kernels

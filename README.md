@@ -331,7 +331,7 @@ raise ExBurn.Error,
 - [Nx](https://github.com/elixir-nx/nx) — Numerical Elixir
 - [Axon](https://github.com/elixir-nx/axon) — Neural network library
 - [CubeCL](https://github.com/tracel-ai/cubecl) — GPU compute language
-- [ExCubecl](https://hex.pm/packages/ex_cubecl) v0.4+ — GPU compute runtime for Elixir (buffers, kernels, pipelines, media)
+- [ExCubecl](https://hex.pm/packages/ex_cubecl) v0.5+ — GPU compute runtime for Elixir (buffers, kernels, pipelines, media)
 
 ---
 

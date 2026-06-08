@@ -18,7 +18,7 @@ def deps do
     {:ex_burn, "~> 0.3"},
     {:nx, ">= 0.12.0"},
     {:axon, "~> 0.8"},
-    {:ex_cubecl, ">= 0.4.0"}
+    {:ex_cubecl, ">= 0.5.0"}
   ]
 end
 ```

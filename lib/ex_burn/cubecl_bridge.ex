@@ -221,7 +221,7 @@ defmodule ExBurn.CubeclBridge do
 
   Returns a command ID that can be polled or waited on.
   """
-  @spec async_submit(ExCubecl.Command.t()) :: {:ok, command_id()} | {:error, term()}
+  @spec async_submit(String.t()) :: {:ok, command_id()} | {:error, term()}
   def async_submit(command), do: ExCubecl.submit(command)
 
   @doc """

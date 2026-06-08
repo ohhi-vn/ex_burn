@@ -3,6 +3,18 @@
 ## [Unreleased]
 
 ### Added
+- **ExCubecl v0.5.0 compatibility**: Updated ex_cubecl dependency to `>= 0.5.0` with new `jason` dependency for kernel params JSON encoding
+- **Command struct support**: `ExCubecl.Command` typed struct for pipeline commands (from ex_cubecl v0.5.0)
+- **`:u8` dtype support**: Picks up new `:u8` (8-bit unsigned integer) dtype from ex_cubecl v0.5.0
+
+### Changed
+- Updated ex_cubecl minimum version from `>= 0.4.0` to `>= 0.5.0`
+- Added `jason ~> 1.4` dependency (required by ex_cubecl v0.5.0 for kernel parameter encoding)
+- Fixed `async_submit/1` type spec to accept `String.t()` (matching ex_cubecl's `submit/1`) instead of `ExCubecl.Command.t()`
+- Updated README and guides to reference ex_cubecl v0.5+
+
+### Fixed
+- Fixed `describe/3` compile error in `test/cuda_test.exs` (reverted to `describe/2` with `@tag` on individual tests)
 - **Model compilation improvements**: GPU forward pass via `Nx.Defn.jit_apply` + `ExBurn.Defn.Compiler`
 - **Glorot/Xavier initialization**: Proper weight initialization for all model parameters
 - **Model summary**: Keras/PyTorch-style layer-by-layer summary with `ExBurn.Model.summary/1`
@@ -23,9 +35,6 @@
 - Updated all guides with accurate, detailed documentation
 - Updated README with current feature status and guide links
 - Updated ROADMAP with completed improvements
-
-### Fixed
-- Fixed `describe/3` compile error in `test/cuda_test.exs` (reverted to `describe/2` with `@tag` on individual tests)
 
 ## [0.1.0] — Initial Release
 

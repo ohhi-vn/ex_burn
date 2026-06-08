@@ -2,7 +2,7 @@ defmodule ExBurn.MixProject do
   use Mix.Project
 
   @app :ex_burn
-  @version "0.4.1"
+  @version "0.4.2"
   @github_url "https://github.com/ohhi-vn/ex_burn"
 
   def project do
@@ -38,7 +38,9 @@ defmodule ExBurn.MixProject do
       # Classical ML algorithms
       {:scholar, "~> 0.4", optional: true},
       # CubeCL GPU backend
-      {:ex_cubecl, ">= 0.4.0 and < 2.0.0", optional: true},
+      {:ex_cubecl, ">= 0.5.0 and < 2.0.0", optional: true},
+      # JSON encoding (used by ExCubecl for kernel params)
+      {:jason, "~> 1.4"},
       # Documentation
       {:ex_doc, "~> 0.40", only: :dev, runtime: false}
     ]
