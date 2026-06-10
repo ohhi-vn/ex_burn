@@ -2,6 +2,10 @@ defmodule ExBurn.BurnBridge do
   @moduledoc """
   High-level bridge for Burn operations.
 
+  ⚠️ **EXPERIMENTAL**: The GPU (ExCubecl) integration in this module
+  is a placeholder for future functionality. The `to_gpu` path and
+  related GPU buffer operations are not yet fully integrated.
+
   This module provides a direct API to Burn tensor operations, bypassing
   the Nx abstraction layer for cases where you need more control or want
   to avoid the overhead of Nx ↔ Burn conversions.

@@ -35,10 +35,11 @@ defmodule ExBurn.Serving do
           batch_size: pos_integer(),
           batch_timeout: pos_integer(),
           partitions: pos_integer(),
-          padding: boolean()
+          padding: boolean(),
+          serving: Nx.Serving.t() | nil
         }
 
-  defstruct [:model, :batch_size, :batch_timeout, :partitions, :padding]
+  defstruct [:model, :batch_size, :batch_timeout, :partitions, :padding, :serving]
 
   @doc """
   Creates a new ExBurn serving for the given compiled model.
@@ -48,8 +49,16 @@ defmodule ExBurn.Serving do
   """
   @spec new(model(), keyword()) :: t()
   def new(%Model{} = model, opts \\ []) do
+    serving =
+      if Keyword.get(opts, :lazy?, false) do
+        nil
+      else
+        build(model, opts)
+      end
+
     %__MODULE__{
       model: model,
+      serving: serving,
       batch_size: Keyword.get(opts, :batch_size, 32),
       batch_timeout: Keyword.get(opts, :batch_timeout, 50),
       partitions: Keyword.get(opts, :partitions, System.schedulers_online()),
@@ -95,10 +104,14 @@ defmodule ExBurn.Serving do
   This is a convenience wrapper around `Nx.Serving.run/2`.
   """
   @spec run(t(), Nx.Tensor.t()) :: Nx.Tensor.t()
-  def run(%__MODULE__{} = serving, input) do
+  def run(%__MODULE__{serving: nil} = serving, input) do
     serving
     |> build()
     |> Nx.Serving.run(input)
+  end
+
+  def run(%__MODULE__{serving: serving}, input) when not is_nil(serving) do
+    Nx.Serving.run(serving, input)
   end
 
   @doc """
@@ -121,13 +134,32 @@ defmodule ExBurn.Serving do
 
   @doc "Returns a new serving with the specified batch size."
   @spec with_batch_size(t(), pos_integer()) :: t()
-  def with_batch_size(%__MODULE__{} = serving, batch_size) do
+  def with_batch_size(%__MODULE__{serving: nil} = serving, batch_size) do
     %{serving | batch_size: batch_size}
+  end
+
+  def with_batch_size(%__MODULE__{serving: serving} = wrapper, batch_size)
+      when not is_nil(serving) do
+    %{wrapper | batch_size: batch_size, serving: build(wrapper.model, serving_opts(wrapper))}
   end
 
   @doc "Returns a new serving with the specified batch timeout."
   @spec with_timeout(t(), pos_integer()) :: t()
-  def with_timeout(%__MODULE__{} = serving, timeout) do
+  def with_timeout(%__MODULE__{serving: nil} = serving, timeout) do
     %{serving | batch_timeout: timeout}
+  end
+
+  def with_timeout(%__MODULE__{serving: serving} = wrapper, timeout)
+      when not is_nil(serving) do
+    %{wrapper | batch_timeout: timeout, serving: build(wrapper.model, serving_opts(wrapper))}
+  end
+
+  defp serving_opts(%__MODULE__{} = wrapper) do
+    [
+      batch_size: wrapper.batch_size,
+      batch_timeout: wrapper.batch_timeout,
+      partitions: wrapper.partitions,
+      padding: wrapper.padding
+    ]
   end
 end

@@ -109,7 +109,7 @@ fn device() -> <GpuBackend as BackendDevice>::Device {
 static GPU_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
 fn gpu_available_cached() -> bool {
-    *GPU_AVAILABLE.get_or_init(|| probe_gpu_available())
+    *GPU_AVAILABLE.get_or_init(probe_gpu_available)
 }
 
 fn probe_gpu_available() -> bool {
@@ -122,7 +122,7 @@ fn probe_gpu_available() -> bool {
         let t: Tensor<Autodiff<burn::backend::Cuda>, 1> = Tensor::from_floats([0.0f32], &dev);
         // Force evaluation by reading the data
         let _ = t.to_data();
-        return true;
+        true
     }
     #[cfg(feature = "metal")]
     {
@@ -130,7 +130,7 @@ fn probe_gpu_available() -> bool {
         let dev = MetalDevice::default();
         let t: Tensor<Autodiff<burn::backend::Metal>, 1> = Tensor::from_floats([0.0f32], &dev);
         let _ = t.to_data();
-        return true;
+        true
     }
     #[cfg(feature = "vulkan")]
     {
@@ -138,7 +138,7 @@ fn probe_gpu_available() -> bool {
         let dev = VulkanDevice::default();
         let t: Tensor<Autodiff<burn::backend::Vulkan>, 1> = Tensor::from_floats([0.0f32], &dev);
         let _ = t.to_data();
-        return true;
+        true
     }
     #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
     {
@@ -473,7 +473,7 @@ fn nif_sqrt_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource
 
 #[inline(never)]
 #[rustler::nif]
-fn nif_sigmoid_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
+fn sigmoid_tensor(a: ResourceArc<TensorResource>) -> ResourceArc<TensorResource> {
     let result = match &a.tensor {
         BurnTensor::F32x1(t) => {
             let one = Tensor::<B, 1>::ones(t.shape(), &device());
@@ -735,11 +735,7 @@ fn nif_free_tensor(_tensor: ResourceArc<TensorResource>) -> rustler::Atom {
 #[inline(never)]
 #[rustler::nif]
 fn nif_softmax_tensor(a: ResourceArc<TensorResource>, dim: i64) -> ResourceArc<TensorResource> {
-    let dim = if dim < 0 {
-        a.shape.len() as usize
-    } else {
-        dim as usize
-    };
+    let dim = if dim < 0 { a.shape.len() } else { dim as usize };
     let result = match &a.tensor {
         BurnTensor::F32x1(t) => {
             let max_val = t.clone().max();
@@ -800,7 +796,7 @@ fn nif_layer_norm_tensor(
 type GradientsType = <B as AutodiffBackend>::Gradients;
 
 thread_local! {
-    static LAST_GRADIENTS: RefCell<Option<GradientsType>> = RefCell::new(None);
+    static LAST_GRADIENTS: RefCell<Option<GradientsType>> = const { RefCell::new(None) };
 }
 
 // ── Autodiff / Backward ────────────────────────────────────────-
@@ -810,17 +806,15 @@ thread_local! {
 #[inline(never)]
 #[rustler::nif]
 fn nif_backward_tensor(a: ResourceArc<TensorResource>) -> rustler::Atom {
-    match &a.tensor {
-        BurnTensor::F32x1(t) => {
-            if a.shape.iter().product::<usize>() == 1 {
-                let grads = t.clone().backward();
-                LAST_GRADIENTS.with(|g| {
-                    *g.borrow_mut() = Some(grads);
-                });
-            }
+    if let BurnTensor::F32x1(t) = &a.tensor {
+        if a.shape.iter().product::<usize>() == 1 {
+            let grads = t.clone().backward();
+            LAST_GRADIENTS.with(|g| {
+                *g.borrow_mut() = Some(grads);
+            });
         }
-        _ => {}
     }
+
     rustler::types::atom::ok()
 }
 
@@ -1014,7 +1008,5 @@ fn nif_dropout(tensor: ResourceArc<TensorResource>, prob: f64) -> ResourceArc<Te
 }
 
 pub extern "C" fn debug_nif_count() -> i32 {
-    rustler::codegen_runtime::inventory::iter::<rustler::Nif>()
-        .into_iter()
-        .count() as i32
+    rustler::codegen_runtime::inventory::iter::<rustler::Nif>().count() as i32
 }

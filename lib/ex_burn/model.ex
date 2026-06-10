@@ -495,7 +495,7 @@ defmodule ExBurn.Model do
   def load(%__MODULE__{} = model, path) do
     case File.read(path) do
       {:ok, binary} ->
-        params = :erlang.binary_to_term(binary)
+        params = :erlang.binary_to_term(binary, [:safe])
         {:ok, %{model | params: params, compiled: true}}
 
       {:error, reason} ->
@@ -518,7 +518,7 @@ defmodule ExBurn.Model do
   @spec deserialize_params(binary()) :: {:ok, map()} | {:error, String.t()}
   def deserialize_params(binary) when is_binary(binary) do
     try do
-      {:ok, :erlang.binary_to_term(binary)}
+      {:ok, :erlang.binary_to_term(binary, [:safe])}
     rescue
       ArgumentError -> {:error, "Invalid parameter binary"}
     end
@@ -743,7 +743,7 @@ defmodule ExBurn.Model do
         params =
           case format do
             :elixir_terms ->
-              :erlang.binary_to_term(binary)
+              :erlang.binary_to_term(binary, [:safe])
 
             :json ->
               case Jason.decode(binary) do

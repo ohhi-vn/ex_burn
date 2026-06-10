@@ -2,7 +2,21 @@ nif_loaded? =
   match?({:module, _}, Code.ensure_loaded(ExBurn.Nif)) and
     function_exported?(ExBurn.Nif, :new_tensor, 3)
 
-ExUnit.start(exclude: [:cuda, :metal, :vulkan] ++ if(nif_loaded?, do: [], else: [:nif]))
+# Check which GPU backends are actually available at runtime
+gpu_available? = nif_loaded? and ExBurn.Nif.gpu_available()
+
+# Only exclude GPU-specific tests when the NIF isn't loaded or no GPU is available
+# This allows CUDA/Metal/Vulkan tests to run on machines with the right hardware
+gpu_excludes =
+  if gpu_available? do
+    []
+  else
+    [:cuda, :metal, :vulkan]
+  end
+
+nif_excludes = if nif_loaded?, do: [], else: [:nif]
+
+ExUnit.start(exclude: gpu_excludes ++ nif_excludes)
 
 # Shared test fixtures
 defmodule ExBurn.TestFixtures do

@@ -62,7 +62,9 @@ defmodule ExBurn.Training do
           accumulate_gradients: pos_integer(),
           accuracy: boolean(),
           nesterov: boolean(),
-          warmup: pos_integer()
+          warmup: pos_integer(),
+          grad_method: atom(),
+          set_default_backend?: boolean()
         ]
 
   @doc """
@@ -83,7 +85,9 @@ defmodule ExBurn.Training do
     * `:accumulate_gradients` — Number of mini-batches to accumulate before
       an optimizer step, effectively multiplying batch size (default: 1)
     * `:accuracy` — Compute and report classification accuracy (default: false)
-    * `:nesterov` — Use Nesterov momentum for SGD optimizer (default: false)
+    * `:nesterov` — Use Nesterov momentum for SGD optimizer (default: `false`)
+    * `:set_default_backend?` — Temporarily set `ExBurn.Backend` as the global Nx backend
+      while training (default: `false`)
 
   ## Returns
 
@@ -100,140 +104,150 @@ defmodule ExBurn.Training do
     lr_schedule = Keyword.get(opts, :lr_schedule)
     clip_norm = Keyword.get(opts, :clip_norm)
     clip_value = Keyword.get(opts, :clip_value)
-    weight_decay = Keyword.get(opts, :weight_decay)
-    accumulate = Keyword.get(opts, :accumulate_gradients, 1)
+    weight_decay = Keyword.get(opts, :weight_decay, model.weight_decay)
+    accumulate = max(Keyword.get(opts, :accumulate_gradients, 1), 1)
     track_accuracy = Keyword.get(opts, :accuracy, false)
     nesterov = Keyword.get(opts, :nesterov, false)
+    grad_method = Keyword.get(opts, :grad_method, :numerical)
+    set_default_backend = Keyword.get(opts, :set_default_backend?, false)
 
     num_samples = Nx.shape(inputs) |> elem(0)
-    num_batches = div(num_samples, batch_size)
+    num_batches = ceil(num_samples / batch_size)
 
-    # Enable Nesterov in SGD optimizer state if requested
-    model =
-      if nesterov && model.optimizer == :sgd do
-        %{model | optimizer_state: Map.put(model.optimizer_state, :nesterov, true)}
-      else
-        model
+    previous_backend =
+      if set_default_backend do
+        previous = Nx.default_backend()
+        Nx.default_backend(ExBurn.Backend)
+        previous
       end
 
-    if verbose do
-      effective_bs = batch_size * accumulate
-      IO.puts("Training: #{num_samples} samples, #{num_batches} batches/epoch, #{epochs} epochs")
-
-      IO.puts(
-        "  batch_size=#{batch_size}, effective_batch_size=#{effective_bs}, optimizer=#{model.optimizer}"
-      )
-
-      opts_summary =
-        [
-          if(weight_decay, do: "weight_decay=#{weight_decay}", else: nil),
-          if(track_accuracy, do: "accuracy=true", else: nil),
-          if(nesterov, do: "nesterov=true", else: nil),
-          if(accumulate > 1, do: "accumulate=#{accumulate}", else: nil)
-        ]
-        |> Enum.reject(&is_nil/1)
-        |> Enum.join(", ")
-
-      if opts_summary != "", do: IO.puts("  #{opts_summary}")
-    end
-
-    # Set ExBurn as the default backend for Nx operations
-    Nx.default_backend(ExBurn.Backend)
-
-    start_time = System.monotonic_time(:millisecond)
-
-    {trained_model, _final_metrics} =
-      Enum.reduce_while({1, epochs}, {model, %{}}, fn epoch, {model, _metrics} ->
-        epoch_start = System.monotonic_time(:millisecond)
-
-        # Apply learning rate schedule
-        model = apply_lr_schedule(model, lr_schedule, epoch, epochs)
-
-        # Train one epoch
-        {epoch_loss, epoch_correct, epoch_total, model} =
-          train_epoch(
-            model,
-            inputs,
-            targets,
-            batch_size,
-            num_batches,
-            clip_norm,
-            clip_value,
-            weight_decay,
-            accumulate,
-            track_accuracy,
-            shuffle
-          )
-
-        epoch_elapsed = System.monotonic_time(:millisecond) - epoch_start
-        total_elapsed = System.monotonic_time(:millisecond) - start_time
-
-        # Build metrics map
-        avg_loss = epoch_loss / max(num_batches, 1)
-
-        metrics =
-          %{
-            epoch: epoch,
-            loss: avg_loss,
-            model: model,
-            epoch_time_ms: epoch_elapsed,
-            total_time_ms: total_elapsed
-          }
-
-        # Compute accuracy if tracking
-        metrics =
-          if track_accuracy && epoch_total > 0 do
-            acc = epoch_correct / epoch_total
-            Map.put(metrics, :accuracy, acc)
-          else
-            metrics
-          end
-
-        # Compute ETA
-        metrics =
-          if epoch < epochs do
-            avg_epoch_time = total_elapsed / epoch
-            remaining_epochs = epochs - epoch
-            eta_ms = avg_epoch_time * remaining_epochs
-            Map.put(metrics, :eta_ms, eta_ms)
-          else
-            metrics
-          end
-
-        metrics =
-          if validation_data do
-            val_result = evaluate(model, validation_data, track_accuracy)
-
-            case val_result do
-              {val_loss, nil} ->
-                Map.put(metrics, :val_loss, val_loss)
-
-              {val_loss, val_acc} ->
-                Map.put(metrics, :val_loss, val_loss) |> Map.put(:val_accuracy, val_acc)
-            end
-          else
-            metrics
-          end
-
-        if verbose do
-          print_progress(metrics, num_samples, epoch_elapsed)
-        end
-
-        # Run callbacks — each callback receives and returns the metrics map
-        metrics = Enum.reduce(callbacks, metrics, fn callback, acc -> callback.(acc) end)
-
-        # Check for early stopping
-        if Map.get(metrics, :stop_training) do
-          {:halt, {model, metrics}}
+    try do
+      # Enable Nesterov in SGD optimizer state if requested
+      model =
+        if nesterov && model.optimizer == :sgd do
+          %{model | optimizer_state: Map.put(model.optimizer_state, :nesterov, true)}
         else
-          {:cont, {model, metrics}}
+          model
         end
-      end)
 
-    trained_model
-  after
-    # Restore default backend
-    Nx.default_backend(Nx.BinaryBackend)
+      if verbose do
+        effective_bs = batch_size * accumulate
+        IO.puts("Training: #{num_samples} samples, #{num_batches} batches/epoch, #{epochs} epochs")
+
+        IO.puts(
+          "  batch_size=#{batch_size}, effective_batch_size=#{effective_bs}, optimizer=#{model.optimizer}"
+        )
+
+        opts_summary =
+          [
+            if(weight_decay, do: "weight_decay=#{weight_decay}", else: nil),
+            if(track_accuracy, do: "accuracy=true", else: nil),
+            if(nesterov, do: "nesterov=true", else: nil),
+            if(accumulate > 1, do: "accumulate=#{accumulate}", else: nil)
+          ]
+          |> Enum.reject(&is_nil/1)
+          |> Enum.join(", ")
+
+        if opts_summary != "", do: IO.puts("  #{opts_summary}")
+      end
+
+      start_time = System.monotonic_time(:millisecond)
+
+      {trained_model, _final_metrics} =
+        Enum.reduce_while({1, epochs}, {model, %{}}, fn epoch, {model, _metrics} ->
+          epoch_start = System.monotonic_time(:millisecond)
+
+          # Apply learning rate schedule
+          model = apply_lr_schedule(model, lr_schedule, epoch, epochs)
+
+          # Train one epoch
+          {epoch_loss, epoch_correct, epoch_total, model} =
+            train_epoch(
+              model,
+              inputs,
+              targets,
+              batch_size,
+              num_batches,
+              clip_norm,
+              clip_value,
+              weight_decay,
+              accumulate,
+              track_accuracy,
+              shuffle,
+              grad_method
+            )
+
+          epoch_elapsed = System.monotonic_time(:millisecond) - epoch_start
+          total_elapsed = System.monotonic_time(:millisecond) - start_time
+
+          # Build metrics map
+          avg_loss = epoch_loss / max(epoch_total, 1)
+
+          metrics =
+            %{
+              epoch: epoch,
+              loss: avg_loss,
+              model: model,
+              epoch_time_ms: epoch_elapsed,
+              total_time_ms: total_elapsed
+            }
+
+          # Compute accuracy if tracking
+          metrics =
+            if track_accuracy && epoch_total > 0 do
+              acc = epoch_correct / epoch_total
+              Map.put(metrics, :accuracy, acc)
+            else
+              metrics
+            end
+
+          # Compute ETA
+          metrics =
+            if epoch < epochs do
+              avg_epoch_time = total_elapsed / epoch
+              remaining_epochs = epochs - epoch
+              eta_ms = avg_epoch_time * remaining_epochs
+              Map.put(metrics, :eta_ms, eta_ms)
+            else
+              metrics
+            end
+
+          metrics =
+            if validation_data do
+              val_result = evaluate(model, validation_data, track_accuracy)
+
+              case val_result do
+                {val_loss, nil} ->
+                  Map.put(metrics, :val_loss, val_loss)
+
+                {val_loss, val_acc} ->
+                  Map.put(metrics, :val_loss, val_loss) |> Map.put(:val_accuracy, val_acc)
+              end
+            else
+              metrics
+            end
+
+          if verbose do
+            print_progress(metrics, num_samples, epoch_elapsed)
+          end
+
+          # Run callbacks — each callback receives and returns the metrics map
+          metrics = Enum.reduce(callbacks, metrics, fn callback, acc -> callback.(acc) end)
+
+          # Check for early stopping
+          if Map.get(metrics, :stop_training) do
+            {:halt, {model, metrics}}
+          else
+            {:cont, {model, metrics}}
+          end
+        end)
+
+      trained_model
+    after
+      if set_default_backend do
+        Nx.default_backend(previous_backend)
+      end
+    end
   end
 
   @doc """
@@ -256,7 +270,7 @@ defmodule ExBurn.Training do
   def train_step(%Model{} = model, {batch_in, batch_tgt}, opts \\ []) do
     clip_norm = Keyword.get(opts, :clip_norm)
     clip_value = Keyword.get(opts, :clip_value)
-    weight_decay = Keyword.get(opts, :weight_decay)
+    weight_decay = Keyword.get(opts, :weight_decay, model.weight_decay)
 
     # Forward pass
     {:ok, pred} = Model.predict(model, batch_in)
@@ -304,7 +318,7 @@ defmodule ExBurn.Training do
 
   ## Options
 
-    * `:grad_method` — Gradient computation method (default: `:autodiff`)
+    * `:grad_method` — Gradient computation method (default: `:numerical`)
     * `:epsilon` — Finite difference step size (default: 1.0e-5)
 
   ## Returns
@@ -313,7 +327,7 @@ defmodule ExBurn.Training do
   """
   @spec compute_gradients(model(), dataset(), keyword()) :: map()
   def compute_gradients(%Model{} = model, {batch_in, batch_tgt}, opts \\ []) do
-    method = Keyword.get(opts, :grad_method, :autodiff)
+    method = Keyword.get(opts, :grad_method, :numerical)
     epsilon = Keyword.get(opts, :epsilon, 1.0e-5)
 
     case method do
@@ -327,7 +341,7 @@ defmodule ExBurn.Training do
         compute_gradients_numerical_batch(model, batch_in, batch_tgt, epsilon)
 
       _ ->
-        compute_gradients_autodiff(model, batch_in, batch_tgt)
+        compute_gradients_numerical(model, batch_in, batch_tgt, epsilon)
     end
   end
 
@@ -355,7 +369,7 @@ defmodule ExBurn.Training do
   def profile_step(%Model{} = model, {batch_in, batch_tgt}, opts \\ []) do
     clip_norm = Keyword.get(opts, :clip_norm)
     clip_value = Keyword.get(opts, :clip_value)
-    weight_decay = Keyword.get(opts, :weight_decay)
+    weight_decay = Keyword.get(opts, :weight_decay, model.weight_decay)
 
     # Forward pass timing
     {pred, forward_time} =
@@ -423,9 +437,10 @@ defmodule ExBurn.Training do
     has_remainder = rem(num_samples, batch_size) > 0
 
     # Process full batches
-    {total_loss, total_correct, total_count} =
-      Enum.reduce(0..(num_full_batches - 1), {0.0, 0, 0}, fn batch_idx,
-                                                             {loss_acc, correct_acc, count_acc} ->
+    {total_loss, total_correct, total_count, total_samples} =
+      Enum.reduce(0..(num_full_batches - 1), {0.0, 0, 0, 0}, fn batch_idx,
+                                                             {loss_acc, correct_acc, count_acc,
+                                                              sample_acc} ->
         start_idx = batch_idx * batch_size
         actual_bs = batch_size
 
@@ -443,11 +458,11 @@ defmodule ExBurn.Training do
             {0, 0}
           end
 
-        {loss_acc + loss_val, correct_acc + correct, count_acc + count}
+        {loss_acc + loss_val * count, correct_acc + correct, count_acc + count, sample_acc + count}
       end)
 
     # Handle last partial batch
-    {total_loss, total_correct, total_count} =
+    {total_loss, total_correct, total_count, total_samples} =
       if has_remainder do
         start_idx = num_full_batches * batch_size
         actual_bs = num_samples - start_idx
@@ -466,13 +481,13 @@ defmodule ExBurn.Training do
             {0, 0}
           end
 
-        {total_loss + loss_val, total_correct + correct, total_count + count}
+        {total_loss + loss_val * count, total_correct + correct, total_count + count,
+         total_samples + count}
       else
-        {total_loss, total_correct, total_count}
+        {total_loss, total_correct, total_count, total_samples}
       end
 
-    total_batches = num_full_batches + if(has_remainder, do: 1, else: 0)
-    avg_loss = total_loss / max(total_batches, 1)
+    avg_loss = total_loss / max(total_samples, 1)
 
     if track_accuracy do
       accuracy = if total_count > 0, do: total_correct / total_count, else: nil
@@ -556,7 +571,8 @@ defmodule ExBurn.Training do
          weight_decay,
          accumulate,
          track_accuracy,
-         shuffle
+         shuffle,
+         grad_method
        ) do
     num_samples = Nx.shape(inputs) |> elem(0)
 
@@ -581,6 +597,7 @@ defmodule ExBurn.Training do
         weight_decay,
         accumulate,
         track_accuracy,
+        grad_method,
         {0.0, 0, 0, model}
       )
 
@@ -598,6 +615,7 @@ defmodule ExBurn.Training do
          _weight_decay,
          _accumulate,
          _track_acc,
+         _grad_method,
          {loss, correct, count, model}
        ) do
     {loss, correct, count, model}
@@ -613,6 +631,7 @@ defmodule ExBurn.Training do
          weight_decay,
          accumulate,
          track_accuracy,
+         grad_method,
          acc
        ) do
     # Take up to `accumulate` batches
@@ -627,7 +646,8 @@ defmodule ExBurn.Training do
         clip_norm,
         clip_value,
         weight_decay,
-        track_accuracy
+        track_accuracy,
+        grad_method
       )
 
     {loss, correct, count, _old_model} = acc
@@ -642,6 +662,7 @@ defmodule ExBurn.Training do
       weight_decay,
       accumulate,
       track_accuracy,
+      grad_method,
       {loss + batch_loss, correct + batch_correct, count + batch_count, updated_model}
     )
   end
@@ -655,7 +676,8 @@ defmodule ExBurn.Training do
          clip_norm,
          clip_value,
          weight_decay,
-         track_accuracy
+         track_accuracy,
+         grad_method \\ :numerical
        ) do
     num_batches = length(batch_indices_list)
 
@@ -673,7 +695,7 @@ defmodule ExBurn.Training do
           loss_val = Nx.to_number(loss)
 
           # Compute gradients
-          grads = compute_gradients(model, {batch_in, batch_tgt}, grad_method: :autodiff)
+          grads = compute_gradients(model, {batch_in, batch_tgt}, grad_method: grad_method)
 
           # Accumulate gradients
           grad_acc =

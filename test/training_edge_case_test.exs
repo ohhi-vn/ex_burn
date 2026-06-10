@@ -113,7 +113,7 @@ defmodule ExBurn.TrainingEdgeCaseTest do
     end
 
     @tag :nif
-    test "computes gradients with autodiff method" do
+    test "computes gradients with autodiff method falls back to numerical" do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
@@ -127,6 +127,7 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       batch_in = Nx.tensor([[1.0, 2.0]])
       batch_tgt = Nx.tensor([[1.0]])
 
+      # Autodiff is not yet implemented, so it falls back to numerical gradients
       grads =
         Training.compute_gradients(compiled, {batch_in, batch_tgt}, grad_method: :autodiff)
 
@@ -143,8 +144,9 @@ defmodule ExBurn.TrainingEdgeCaseTest do
     end
 
     @tag :nif
-    test "autodiff gradients have correct signs for MSE" do
-      # For a simple linear model with MSE loss, we can verify gradient direction
+    test "autodiff with MSE falls back to numerical and returns valid gradients" do
+      # For a simple linear model with MSE loss, verify gradients are computable
+      # (autodiff falls back to numerical since it's not yet implemented)
       model =
         Axon.input("input", shape: {nil, 1})
         |> Axon.dense(1, use_bias: false)
@@ -168,7 +170,7 @@ defmodule ExBurn.TrainingEdgeCaseTest do
     end
 
     @tag :nif
-    test "autodiff with cross_entropy loss" do
+    test "autodiff with cross_entropy falls back to numerical" do
       model =
         Axon.input("input", shape: {nil, 3})
         |> Axon.dense(5)
@@ -190,7 +192,7 @@ defmodule ExBurn.TrainingEdgeCaseTest do
     end
 
     @tag :nif
-    test "falls back to autodiff for unknown method" do
+    test "falls back to numerical for unknown method" do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
@@ -204,7 +206,7 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       batch_in = Nx.tensor([[1.0, 2.0]])
       batch_tgt = Nx.tensor([[1.0]])
 
-      # Unknown method should fall back to autodiff (the new default)
+      # Unknown method falls back to numerical (the default)
       grads =
         Training.compute_gradients(compiled, {batch_in, batch_tgt}, grad_method: :unknown_method)
 
@@ -213,7 +215,7 @@ defmodule ExBurn.TrainingEdgeCaseTest do
     end
 
     @tag :nif
-    test "default gradient method is autodiff" do
+    test "default gradient method is numerical" do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
@@ -227,7 +229,7 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       batch_in = Nx.tensor([[1.0, 2.0]])
       batch_tgt = Nx.tensor([[1.0]])
 
-      # No grad_method specified — should use autodiff by default
+      # No grad_method specified — should use numerical by default
       grads = Training.compute_gradients(compiled, {batch_in, batch_tgt})
       assert is_map(grads)
       assert map_size(grads) > 0
@@ -466,9 +468,9 @@ defmodule ExBurn.TrainingEdgeCaseTest do
     end
   end
 
-  describe "train_step/3 with autodiff" do
+  describe "train_step/3 with gradient methods" do
     @tag :nif
-    test "performs a single training step with default autodiff" do
+    test "performs a single training step with default (numerical) method" do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
@@ -489,7 +491,7 @@ defmodule ExBurn.TrainingEdgeCaseTest do
     end
 
     @tag :nif
-    test "train_step with explicit autodiff method" do
+    test "train_step with explicit autodiff method falls back to numerical" do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
@@ -559,9 +561,9 @@ defmodule ExBurn.TrainingEdgeCaseTest do
     end
   end
 
-  describe "fit/3 with autodiff" do
+  describe "fit/3 with gradient methods" do
     @tag :nif
-    test "trains a simple model with default autodiff" do
+    test "trains a simple model with default (numerical) method" do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
@@ -589,7 +591,7 @@ defmodule ExBurn.TrainingEdgeCaseTest do
     end
 
     @tag :nif
-    test "fit with autodiff and cross_entropy" do
+    test "fit with autodiff (falls back to numerical) and cross_entropy" do
       model =
         Axon.input("input", shape: {nil, 3})
         |> Axon.dense(2)
@@ -621,7 +623,7 @@ defmodule ExBurn.TrainingEdgeCaseTest do
     end
 
     @tag :nif
-    test "fit with autodiff and gradient accumulation" do
+    test "fit with gradient accumulation using default numerical method" do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
@@ -648,7 +650,7 @@ defmodule ExBurn.TrainingEdgeCaseTest do
     end
 
     @tag :nif
-    test "fit with autodiff and callbacks" do
+    test "fit with default numerical method and callbacks" do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
@@ -682,9 +684,9 @@ defmodule ExBurn.TrainingEdgeCaseTest do
     end
   end
 
-  describe "profile_step/3 with autodiff" do
+  describe "profile_step/3 with gradient methods" do
     @tag :nif
-    test "profiles a training step with autodiff" do
+    test "profiles a training step with autodiff (falls back to numerical)" do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)

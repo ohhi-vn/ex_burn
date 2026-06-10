@@ -6,7 +6,7 @@ defmodule ExBurn.BackendTest do
     Nx.default_backend(ExBurn.Backend)
     on_exit(fn -> Nx.default_backend(previous) end)
     :ok
- end
+  end
 
   describe "tensor creation" do
     @tag :nif

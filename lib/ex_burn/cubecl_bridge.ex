@@ -2,6 +2,11 @@ defmodule ExBurn.CubeclBridge do
   @moduledoc """
   Bridge to ExCubecl for GPU execution via Burn's CubeCL backend.
 
+  ⚠️ **EXPERIMENTAL**: This module is a placeholder for future GPU
+  acceleration via the ExCubecl library. The API is unstable and may
+  change without notice. GPU operations are not yet fully integrated
+  with the ExBurn tensor pipeline.
+
   CubeCL (Compute Unified Backend for Compute Language) is Burn's
   GPU compute abstraction layer that supports:
 

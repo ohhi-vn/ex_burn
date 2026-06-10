@@ -31,7 +31,10 @@ Metal (iOS) / Vulkan (Android) / CUDA → GPU
 
 ## Status
 
-**Version 0.1.0 — Early Alpha**
+**Version 0.4.2 — Early Alpha**
+
+> ⚠️ **Note**: This library is in early development. The API may change
+> between minor versions. Not yet recommended for production use.
 
 | Feature | Status |
 |---------|--------|
@@ -55,18 +58,30 @@ Metal (iOS) / Vulkan (Android) / CUDA → GPU
 | Nx.Serving | ✅ Implemented |
 | CUDA backend | ✅ Implemented |
 | Precompiled NIF binaries | 🚧 Planned |
+| Autodiff gradients | 🚧 Planned |
 
-> ⚠️ **Note**: The Quick Start examples show the target API. Some features
-> (training loop, mobile deployment) are partially implemented and may not
-> work end-to-end yet. See the [guides](guides/) for what's currently working.
+### Known limitations
+
+- **Dtype support**: Many operations silently cast to `f32`. Full dtype
+  preservation is planned for a future release.
+- **Gradient computation**: The default gradient method is `:numerical`
+  (finite differences). Autodiff gradients are planned but not yet
+  implemented.
+- **Global backend mutation**: By default, `Training.fit/3` no longer
+  changes the global Nx backend. Pass `set_default_backend?: true` to
+  restore the previous behavior.
+- **Evaluation loss**: Loss is now correctly weighted by sample count
+  when batches have different sizes.
 
 ## Features
 
-- **Nx Backend**: Full `Nx.Backend` behaviour implementation — drop-in replacement for `Nx.BinaryBackend`
+- **Nx Backend**: `Nx.Backend` behaviour implementation — partial drop-in
+  replacement for `Nx.BinaryBackend` with some dtype limitations
 - **Nx Defn Compiler**: Custom `Nx.Defn.Compiler` that executes defn expressions on the Burn GPU backend
 - **GPU Acceleration**: Burn's CubeCL backend with CUDA (NVIDIA), Metal (Apple), Vulkan (Android)
 - **ExCubecl Integration**: GPU buffer management, kernel execution, async commands, and pipeline orchestration via [ExCubecl](https://hex.pm/packages/ex_cubecl)
-- **Autodiff**: Automatic differentiation via Burn's `Autodiff` backend decorator
+- **Autodiff**: Planned automatic differentiation via Burn's `Autodiff`
+  backend decorator; currently uses numerical gradients
 - **Training Loop**: Complete training with Adam, SGD, RMSprop optimizers, LR scheduling, gradient clipping, callbacks
 - **Model Management**: Save/load, serialize, quantize (f16), benchmark
 - **Structured Errors**: `ExBurn.Error` exception type with operation context

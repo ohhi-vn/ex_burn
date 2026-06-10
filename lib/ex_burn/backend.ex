@@ -120,12 +120,13 @@ defmodule ExBurn.Backend do
   @impl true
   @spec add(Nx.Tensor.t(), t(), t()) :: t()
   def add(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    a = maybe_cast(a, :f32)
-    b = maybe_cast(b, :f32)
+    out_type = result_type(a.type, b.type)
+    a = maybe_cast(a, out_type)
+    b = maybe_cast(b, out_type)
 
     with {:ok, ref} <- Nif.add_tensor(a.ref, b.ref),
          {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
+      %__MODULE__{ref: ref, shape: shape, type: out_type}
     else
       {:error, reason} -> raise Error, op: :add, reason: reason
     end
@@ -134,12 +135,13 @@ defmodule ExBurn.Backend do
   @impl true
   @spec subtract(Nx.Tensor.t(), t(), t()) :: t()
   def subtract(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    a = maybe_cast(a, :f32)
-    b = maybe_cast(b, :f32)
+    out_type = result_type(a.type, b.type)
+    a = maybe_cast(a, out_type)
+    b = maybe_cast(b, out_type)
 
     with {:ok, ref} <- Nif.sub_tensor(a.ref, b.ref),
          {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
+      %__MODULE__{ref: ref, shape: shape, type: out_type}
     else
       {:error, reason} -> raise Error, op: :subtract, reason: reason
     end
@@ -148,12 +150,13 @@ defmodule ExBurn.Backend do
   @impl true
   @spec multiply(Nx.Tensor.t(), t(), t()) :: t()
   def multiply(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    a = maybe_cast(a, :f32)
-    b = maybe_cast(b, :f32)
+    out_type = result_type(a.type, b.type)
+    a = maybe_cast(a, out_type)
+    b = maybe_cast(b, out_type)
 
     with {:ok, ref} <- Nif.mul_tensor(a.ref, b.ref),
          {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
+      %__MODULE__{ref: ref, shape: shape, type: out_type}
     else
       {:error, reason} -> raise Error, op: :multiply, reason: reason
     end
@@ -162,12 +165,13 @@ defmodule ExBurn.Backend do
   @impl true
   @spec divide(Nx.Tensor.t(), t(), t()) :: t()
   def divide(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    a = maybe_cast(a, :f32)
-    b = maybe_cast(b, :f32)
+    out_type = result_type(a.type, b.type)
+    a = maybe_cast(a, out_type)
+    b = maybe_cast(b, out_type)
 
     with {:ok, ref} <- Nif.div_tensor(a.ref, b.ref),
          {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
+      %__MODULE__{ref: ref, shape: shape, type: out_type}
     else
       {:error, reason} -> raise Error, op: :divide, reason: reason
     end
@@ -267,12 +271,13 @@ defmodule ExBurn.Backend do
   @impl true
   @spec pow(Nx.Tensor.t(), t(), t()) :: t()
   def pow(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    a = maybe_cast(a, :f32)
-    b = maybe_cast(b, :f32)
+    out_type = result_type(a.type, b.type)
+    a = maybe_cast(a, out_type)
+    b = maybe_cast(b, out_type)
 
     with {:ok, ref} <- Nif.pow_tensor(a.ref, b.ref),
          {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
+      %__MODULE__{ref: ref, shape: shape, type: out_type}
     else
       {:error, reason} -> raise Error, op: :pow, reason: reason
     end
@@ -1220,12 +1225,13 @@ defmodule ExBurn.Backend do
   @spec random_uniform(Nx.Tensor.t(), keyword()) :: t()
   def random_uniform(%Nx.Tensor{} = out, opts) do
     shape = Tuple.to_list(Nx.shape(out))
+    type = nx_to_burn_type(Nx.type(out))
     low = opts[:low] || 0.0
     high = opts[:high] || 1.0
 
-    with {:ok, ref} <- ExBurn.NifHelper.random_tensor(shape, "f32", low, high),
+    with {:ok, ref} <- ExBurn.NifHelper.random_tensor(shape, Atom.to_string(type), low, high),
          {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
+      %__MODULE__{ref: ref, shape: shape, type: type}
     else
       {:error, reason} ->
         raise Error, op: :random_uniform, reason: reason
@@ -1235,12 +1241,13 @@ defmodule ExBurn.Backend do
   @spec random_normal(Nx.Tensor.t(), keyword()) :: t()
   def random_normal(%Nx.Tensor{} = out, opts) do
     shape = Tuple.to_list(Nx.shape(out))
+    nx_type = Nx.type(out)
     mean = opts[:mean] || 0.0
     std = opts[:std] || 1.0
 
     # Use Nx.Random.normal for proper normal distribution
     key = Nx.Random.key(System.os_time())
-    {nx_tensor, _} = Nx.Random.normal(key, mean, std, shape: List.to_tuple(shape), type: {:f, 32})
+    {nx_tensor, _} = Nx.Random.normal(key, mean, std, shape: List.to_tuple(shape), type: nx_type)
 
     case from_nx(nx_tensor) do
       {:ok, bt} -> bt
@@ -1480,8 +1487,9 @@ defmodule ExBurn.Backend do
 
   @impl true
   @spec as_type(Nx.Tensor.t(), t()) :: t()
-  def as_type(_out, %__MODULE__{} = a) do
-    a
+  def as_type(out, %__MODULE__{} = a) do
+    out_type = nx_to_burn_type(Nx.type(out))
+    maybe_cast(a, out_type)
   end
 
   @impl true
@@ -1630,14 +1638,38 @@ defmodule ExBurn.Backend do
   end
 
   @spec constant_from_val(float(), t(), Nx.Tensor.t()) :: t()
-  defp constant_from_val(val, %__MODULE__{} = template, out) do
-    data = <<val::float-32-native>>
+  defp constant_from_val(val, %__MODULE__{type: type} = template, out) do
+    data = encode_val(val, type)
     shape = Tuple.to_list(Nx.shape(out))
 
-    case Nif.new_tensor(data, shape, "f32") do
-      {:ok, ref} -> %__MODULE__{ref: ref, shape: shape, type: :f32}
+    case Nif.new_tensor(data, shape, Atom.to_string(type)) do
+      {:ok, ref} -> %__MODULE__{ref: ref, shape: shape, type: type}
       {:error, _} -> template
     end
+  end
+
+  defp encode_val(val, :f32), do: <<val::float-32-native>>
+  defp encode_val(val, :f64), do: <<val::float-64-native>>
+  defp encode_val(val, :f16), do: <<val::float-16-native>>
+  defp encode_val(val, :bf16), do: <<val::float-16-native>>
+  defp encode_val(val, _), do: <<val::float-32-native>>
+
+  @type_precedence %{
+    f64: 10,
+    f32: 9,
+    f16: 8,
+    bf16: 7,
+    i64: 6,
+    i32: 5,
+    i16: 4,
+    i8: 3,
+    u8: 2
+  }
+
+  defp result_type(type_a, type_b) do
+    pa = Map.get(@type_precedence, type_a, 0)
+    pb = Map.get(@type_precedence, type_b, 0)
+    if pb > pa, do: type_b, else: type_a
   end
 
   @spec expand_shape([non_neg_integer()], non_neg_integer()) :: [non_neg_integer()]
