@@ -75,11 +75,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 2}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model, loss: :mse)
       batch_in = Nx.tensor([[1.0, 2.0]])
@@ -95,11 +90,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 2}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model, loss: :mse)
       batch_in = Nx.tensor([[1.0, 2.0]])
@@ -117,11 +107,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 2}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model, loss: :mse)
       batch_in = Nx.tensor([[1.0, 2.0]])
@@ -150,14 +135,7 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 1})
         |> Axon.dense(1, use_bias: false)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 1}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
-      # Set weight to a known value
-      model = %{model | params: %{}}
       compiled = ExBurn.Model.compile(model, loss: :mse)
       batch_in = Nx.tensor([[2.0]])
       batch_tgt = Nx.tensor([[10.0]])
@@ -174,11 +152,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 3})
         |> Axon.dense(5)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 3}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model, loss: :cross_entropy)
       batch_in = Nx.tensor([[1.0, 2.0, 3.0]])
@@ -196,11 +169,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 2}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model, loss: :mse)
       batch_in = Nx.tensor([[1.0, 2.0]])
@@ -219,11 +187,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 2}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model, loss: :mse)
       batch_in = Nx.tensor([[1.0, 2.0]])
@@ -242,11 +205,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 2}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model, loss: :mse)
       inputs = Nx.tensor([[1.0, 2.0], [3.0, 4.0]])
@@ -262,11 +220,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(3)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 2}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model, loss: :cross_entropy)
       inputs = Nx.tensor([[1.0, 2.0], [3.0, 4.0]])
@@ -283,18 +236,15 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 2}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model, loss: :mse)
       inputs = Nx.tensor([[1.0, 2.0]])
       targets = Nx.tensor([[1.0]])
 
       result = Training.evaluate(compiled, {inputs, targets}, true)
-      assert is_float(result)
+      assert {loss, accuracy} = result
+      assert is_float(loss)
+      assert is_nil(accuracy)
     end
 
     @tag :nif
@@ -302,11 +252,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 2}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model, loss: :mse)
       inputs = Nx.tensor([[1.0, 2.0]])
@@ -321,11 +266,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 2}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model, loss: :mse)
       # 5 samples with batch_size defaulting to min(256, 5) = 5
@@ -379,11 +319,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 2}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model)
       callback = Training.CheckpointCallback.every(2, dir)
@@ -442,17 +377,18 @@ defmodule ExBurn.TrainingEdgeCaseTest do
   end
 
   describe "HistoryCallback" do
-    test "records metrics history" do
+    test "records metrics history and exposes it via :history_pid" do
       callback = Training.HistoryCallback.new()
 
       metrics1 = %{epoch: 1, loss: 0.5}
       metrics2 = %{epoch: 2, loss: 0.3}
 
-      callback.(metrics1)
-      callback.(metrics2)
+      _result1 = callback.(metrics1)
+      result2 = callback.(metrics2)
 
-      # get_history/0 returns empty list (known limitation)
-      assert Training.HistoryCallback.get_history() == []
+      assert is_pid(result2.history_pid)
+      history = Training.HistoryCallback.get_history(result2.history_pid)
+      assert [%{epoch: 1, loss: 0.5}, %{epoch: 2, loss: 0.3}] = history
     end
 
     test "get_history with pid returns reversed history" do
@@ -474,11 +410,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 2}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model, loss: :mse)
       batch_in = Nx.tensor([[1.0, 2.0]])
@@ -495,11 +426,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 2}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model, loss: :mse)
       batch_in = Nx.tensor([[1.0, 2.0]])
@@ -517,11 +443,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 2}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model, loss: :mse)
       batch_in = Nx.tensor([[1.0, 2.0]])
@@ -541,11 +462,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 2}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model, loss: :mse)
       batch_in = Nx.tensor([[1.0, 2.0]])
@@ -567,11 +483,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 2}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model, loss: :mse, optimizer: :sgd, learning_rate: 0.01)
 
@@ -595,11 +506,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 3})
         |> Axon.dense(2)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 3}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled =
         ExBurn.Model.compile(model,
@@ -627,11 +533,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 2}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model, loss: :mse, optimizer: :sgd, learning_rate: 0.01)
 
@@ -654,11 +555,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 2}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model, loss: :mse, optimizer: :sgd, learning_rate: 0.01)
 
@@ -690,11 +586,6 @@ defmodule ExBurn.TrainingEdgeCaseTest do
       model =
         Axon.input("input", shape: {nil, 2})
         |> Axon.dense(1)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 2}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled = ExBurn.Model.compile(model, loss: :mse)
       batch_in = Nx.tensor([[1.0, 2.0]])

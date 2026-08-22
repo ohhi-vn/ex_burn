@@ -29,14 +29,14 @@ defmodule ExBurn.BurnBridge do
   # ── Tensor Creation ──────────────────────────────────────────────
 
   @doc "Creates a tensor filled with zeros."
-  @spec zeros([non_neg_integer()], BT.type()) :: BT.t()
+  @spec zeros([non_neg_integer()], BT.burn_type()) :: BT.t()
   def zeros(shape, type \\ :f32) do
     ref = ExBurn.Nif.zeros_tensor(shape, Atom.to_string(type))
     %BT{ref: ref, shape: shape, type: type}
   end
 
   @doc "Creates a tensor filled with ones."
-  @spec ones([non_neg_integer()], BT.type()) :: BT.t()
+  @spec ones([non_neg_integer()], BT.burn_type()) :: BT.t()
   def ones(shape, type \\ :f32) do
     ref = ExBurn.Nif.ones_tensor(shape, Atom.to_string(type))
     %BT{ref: ref, shape: shape, type: type}
@@ -61,7 +61,7 @@ defmodule ExBurn.BurnBridge do
   end
 
   @doc "Creates a random tensor with uniform distribution."
-  @spec rand([non_neg_integer()], BT.type(), float(), float()) :: BT.t()
+  @spec rand([non_neg_integer()], BT.burn_type(), float(), float()) :: BT.t()
   def rand(shape, type \\ :f32, low \\ 0.0, high \\ 1.0) do
     # Use Nx to generate random values, then convert to Burn tensor
     nx_type = burn_type_to_nx_type(type)
@@ -190,10 +190,8 @@ defmodule ExBurn.BurnBridge do
   # ── Linear Algebra ───────────────────────────────────────────────
 
   @spec matmul(BT.t(), BT.t()) :: BT.t()
-  def matmul(%BT{ref: ref_a, type: type}, %BT{ref: ref_b}) do
+  def matmul(%BT{ref: ref_a, shape: shape_a, type: type}, %BT{ref: ref_b, shape: shape_b}) do
     ref = ExBurn.Nif.matmul_tensor(ref_a, ref_b)
-    shape_a = BT.shape(%BT{ref: ref_a})
-    shape_b = BT.shape(%BT{ref: ref_b})
     out_shape = matmul_output_shape(shape_a, shape_b)
     %BT{ref: ref, shape: out_shape, type: type}
   end
@@ -214,7 +212,7 @@ defmodule ExBurn.BurnBridge do
         Nx.from_binary(ExBurn.Nif.tensor_to_binary(ref), nx_type)
         |> Nx.reshape(List.to_tuple(shape))
 
-      transposed = Nx.transpose(nx_tensor, axes: [dim0, dim1])
+      transposed = Nx.transpose(nx_tensor, axes: swap_axes(length(shape), dim0, dim1))
       data = Nx.to_binary(transposed)
       new_shape = Tuple.to_list(Nx.shape(transposed))
       new_ref = ExBurn.Nif.new_tensor(data, new_shape, Atom.to_string(type))
@@ -244,13 +242,13 @@ defmodule ExBurn.BurnBridge do
     %BT{ref: ref, shape: shape, type: type}
   end
 
-  @spec softmax(BT.t(), non_neg_integer()) :: BT.t()
+  @spec softmax(BT.t(), integer()) :: BT.t()
   def softmax(%BT{ref: ref, shape: shape, type: type}, dim \\ -1) do
     ref = ExBurn.Nif.softmax_tensor(ref, dim)
     %BT{ref: ref, shape: shape, type: type}
   end
 
-  @spec layer_norm(BT.t(), non_neg_integer(), float()) :: BT.t()
+  @spec layer_norm(BT.t(), integer(), float()) :: BT.t()
   def layer_norm(%BT{ref: ref, shape: shape, type: type}, dim \\ -1, eps \\ 1.0e-5) do
     ref = ExBurn.Nif.layer_norm_tensor(ref, dim, eps)
     %BT{ref: ref, shape: shape, type: type}
@@ -318,19 +316,15 @@ defmodule ExBurn.BurnBridge do
 
   @spec to_gpu(BT.t()) :: BT.t()
   def to_gpu(%BT{ref: ref, shape: shape, type: type} = bt) do
-    if gpu_available?() do
-      # With a GPU backend compiled in, the NIF already places tensors on the GPU.
-      # nif_to_gpu forces evaluation/synchronization and returns a new tensor ref.
-      try do
-        new_ref = ExBurn.Nif.to_gpu(ref)
-        %BT{ref: new_ref, shape: shape, type: type}
-      rescue
-        _ ->
-          # Fallback: try ExCubecl path
-          to_gpu_via_excubecl(bt, shape, type)
-      end
-    else
-      to_gpu_via_excubecl(bt, shape, type)
+    # The NIF places tensors on the compiled backend's device (GPU when a GPU
+    # backend is built in, otherwise CPU) and always returns a valid tensor
+    # resource — so refs stay usable for subsequent operations.
+    try do
+      new_ref = ExBurn.Nif.to_gpu(ref)
+      %BT{ref: new_ref, shape: shape, type: type}
+    rescue
+      _ ->
+        bt
     end
   end
 
@@ -346,18 +340,6 @@ defmodule ExBurn.BurnBridge do
   end
 
   # ── GPU via ExCubecl fallback ────────────────────────────────────
-
-  defp to_gpu_via_excubecl(bt, shape, type) do
-    case ExBurn.Nif.tensor_to_binary(bt.ref) do
-      binary ->
-        flat_data = for <<x::float-32 <- binary>>, do: x
-
-        case ExCubecl.buffer(flat_data, shape, type) do
-          {:ok, buf} -> %BT{ref: buf, shape: shape, type: type}
-          {:error, _} -> bt
-        end
-    end
-  end
 
   defp backend_name do
     name = device_name()
@@ -380,8 +362,8 @@ defmodule ExBurn.BurnBridge do
   defp matmul_output_shape([m, _k], [_, n]), do: [m, n]
   defp matmul_output_shape([m], [n]), do: [m, n]
 
-  defp matmul_output_shape(shape_a, shape_b) do
-    m = List.last(Enum.drop(shape_a, -1))
+  defp matmul_output_shape(shape_a, shape_b) when length(shape_a) >= 2 and length(shape_b) >= 2 do
+    m = Enum.at(shape_a, -2)
     n = List.last(shape_b)
     batch = Enum.drop(shape_a, -2)
     batch ++ [m, n]
@@ -391,5 +373,15 @@ defmodule ExBurn.BurnBridge do
     vi = Enum.at(list, i)
     vj = Enum.at(list, j)
     list |> List.replace_at(i, vj) |> List.replace_at(j, vi)
+  end
+
+  # Full axis permutation swapping dim0/dim1 — Nx.transpose requires a
+  # permutation whose length matches the rank.
+  defp swap_axes(rank, dim0, dim1) when is_integer(rank) do
+    Enum.map(0..(rank - 1), fn
+      ^dim0 -> dim1
+      ^dim1 -> dim0
+      axis -> axis
+    end)
   end
 end

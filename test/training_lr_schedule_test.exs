@@ -7,11 +7,6 @@ defmodule ExBurn.TrainingLRScheduleTest do
   defp simple_model do
     Axon.input("input", shape: {nil, 2})
     |> Axon.dense(1)
-    |> (fn g ->
-          {init_fn, _} = Axon.build(g, [])
-          template = Nx.template({1, 2}, :f32)
-          init_fn.(template, Axon.ModelState.empty())
-        end).()
   end
 
   describe "fit/3 with step LR schedule" do
@@ -299,11 +294,6 @@ defmodule ExBurn.TrainingLRScheduleTest do
       model =
         Axon.input("input", shape: {nil, 3})
         |> Axon.dense(2)
-        |> (fn g ->
-              {init_fn, _} = Axon.build(g, [])
-              template = Nx.template({1, 3}, :f32)
-              init_fn.(template, Axon.ModelState.empty())
-            end).()
 
       compiled =
         ExBurn.Model.compile(model, loss: :cross_entropy, optimizer: :adam, learning_rate: 0.01)

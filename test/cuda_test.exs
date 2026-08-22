@@ -94,11 +94,8 @@ defmodule ExBurn.CudaTest do
 
     @tag :nif
     test "is :gpu when NIF reports GPU available" do
-      if gpu?() do
-        assert ExBurn.default_device() == :gpu
-      else
-        assert ExBurn.default_device() == :cpu
-      end
+      expected = if gpu?(), do: :gpu, else: :cpu
+      assert ExBurn.default_device() == expected
     end
   end
 
@@ -211,7 +208,9 @@ defmodule ExBurn.CudaTest do
       gpu_bt = ExBurn.BurnBridge.to_gpu(bt)
       cpu_bt = ExBurn.BurnBridge.to_cpu(gpu_bt)
       result = ExBurn.BurnBridge.to_nx(cpu_bt)
-      assert Nx.to_list(result) == [1.0, 2.0, 3.0, 4.0]
+
+      assert ExBurn.Tensor.shape(cpu_bt) == [2, 2]
+      assert Nx.to_list(result) == [[1.0, 2.0], [3.0, 4.0]]
     end
   end
 
@@ -238,7 +237,7 @@ defmodule ExBurn.CudaTest do
       gpu_ref = ExBurn.Nif.to_gpu(ref)
       cpu_ref = ExBurn.Nif.to_cpu(gpu_ref)
       binary = ExBurn.Nif.tensor_to_binary(cpu_ref)
-      vals = for <<x::float-32 <- binary>>, do: x
+      vals = for <<x::float-32-native <- binary>>, do: x
       assert vals == [10.0, 20.0, 30.0]
     end
   end

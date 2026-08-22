@@ -5,11 +5,6 @@ defmodule ExBurn.ModelBenchmarkTest do
     Axon.input("input", shape: {nil, input_dim})
     |> Axon.dense(hidden, activation: :relu, name: "hidden")
     |> Axon.dense(output_dim, name: "output")
-    |> (fn g ->
-          {init_fn, _} = Axon.build(g, [])
-          template = Nx.template({1, input_dim}, :f32)
-          init_fn.(template, Axon.ModelState.empty())
-        end).()
   end
 
   describe "benchmark/3" do
@@ -17,7 +12,7 @@ defmodule ExBurn.ModelBenchmarkTest do
     test "returns a map with timing statistics" do
       model = axon_model(10, 5, 3)
       compiled = ExBurn.Model.compile(model)
-      input = Nx.Random.uniform(Nx.Random.key(1), -1.0, 1.0, shape: {1, 10})
+      {input, _key} = Nx.Random.uniform(Nx.Random.key(1), -1.0, 1.0, shape: {1, 10})
 
       result = ExBurn.Model.benchmark(compiled, input, warmup: 2, runs: 5)
 
@@ -40,7 +35,7 @@ defmodule ExBurn.ModelBenchmarkTest do
     test "uses default warmup and runs" do
       model = axon_model(5, 3, 2)
       compiled = ExBurn.Model.compile(model)
-      input = Nx.Random.uniform(Nx.Random.key(1), -1.0, 1.0, shape: {1, 5})
+      {input, _key} = Nx.Random.uniform(Nx.Random.key(1), -1.0, 1.0, shape: {1, 5})
 
       result = ExBurn.Model.benchmark(compiled, input)
 
@@ -52,7 +47,7 @@ defmodule ExBurn.ModelBenchmarkTest do
     test "median is between min and max" do
       model = axon_model(10, 5, 3)
       compiled = ExBurn.Model.compile(model)
-      input = Nx.Random.uniform(Nx.Random.key(1), -1.0, 1.0, shape: {1, 10})
+      {input, _key} = Nx.Random.uniform(Nx.Random.key(1), -1.0, 1.0, shape: {1, 10})
 
       result = ExBurn.Model.benchmark(compiled, input, warmup: 2, runs: 10)
 

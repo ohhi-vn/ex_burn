@@ -63,7 +63,7 @@ defmodule ExBurn.BackendTest do
     test "addition" do
       a = Nx.tensor([[1.0, 2.0], [3.0, 4.0]])
       b = Nx.tensor([[5.0, 6.0], [7.0, 8.0]])
-      assert Nx.to_list(Nx.add(a, b)) == [6.0, 8.0, 10.0, 12.0]
+      assert Nx.to_list(Nx.add(a, b)) == [[6.0, 8.0], [10.0, 12.0]]
     end
 
     @tag :nif
@@ -83,14 +83,15 @@ defmodule ExBurn.BackendTest do
     @tag :nif
     test "sum" do
       a = Nx.tensor([1.0, 2.0, 3.0])
-      assert Nx.to_list(Nx.sum(a)) == [6.0]
+      assert Nx.to_number(Nx.sum(a)) == 6.0
     end
 
     @tag :nif
     test "mean" do
       a = Nx.tensor([1.0, 2.0, 3.0, 4.0])
-      [val] = Nx.to_list(Nx.mean(a))
-      assert_in_delta val, 2.5, 1.0e-6
+      # Scalar results now honour the declared output shape ({}) instead of
+      # the Rust layer's rank-1 representation.
+      assert_in_delta Nx.to_number(Nx.mean(a)), 2.5, 1.0e-6
     end
   end
 end

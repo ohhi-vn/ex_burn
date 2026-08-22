@@ -16,9 +16,33 @@ defmodule ExBurn.TensorTest do
       assert ExBurn.Tensor.burn_type_to_nx(:i64) == {:s, 64}
     end
 
-    test "unknown types default to f32" do
-      assert ExBurn.Tensor.nx_type_to_burn({:u, 32}) == :f32
-      assert ExBurn.Tensor.burn_type_to_nx(:unknown) == {:f, 32}
+    test "mapping is faithful — no silent dtype coercion" do
+      assert ExBurn.Tensor.nx_to_burn({:f, 16}) == :f16
+      assert ExBurn.Tensor.nx_to_burn({:bf, 16}) == :bf16
+      assert ExBurn.Tensor.nx_to_burn({:s, 8}) == :i8
+      assert ExBurn.Tensor.nx_to_burn({:s, 16}) == :i16
+      assert ExBurn.Tensor.nx_to_burn({:u, 8}) == :u8
+
+      assert ExBurn.Tensor.burn_to_nx(:f16) == {:f, 16}
+      assert ExBurn.Tensor.burn_to_nx(:bf16) == {:bf, 16}
+      assert ExBurn.Tensor.burn_to_nx(:i8) == {:s, 8}
+      assert ExBurn.Tensor.burn_to_nx(:i16) == {:s, 16}
+      assert ExBurn.Tensor.burn_to_nx(:u8) == {:u, 8}
+    end
+
+    test "unsupported Nx types raise a structured error" do
+      assert_raise(ExBurn.Error, ~r/not supported/, fn ->
+        ExBurn.Tensor.nx_to_burn({:u, 32})
+      end)
+    end
+
+    @tag :nif
+    test "creating a tensor with an unsupported dtype returns a clear error" do
+      assert {:error, message} =
+               Nx.tensor([1.0, 2.0], type: :f64)
+               |> ExBurn.Tensor.from_nx()
+
+      assert message =~ "not supported" and message =~ "f32"
     end
   end
 

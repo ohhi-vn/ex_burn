@@ -134,10 +134,11 @@ defmodule BurnBridgeOps do
     IO.puts("\nReductions:")
     d = ExBurn.BurnBridge.from_nx(Nx.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
 
-    sum_result = ExBurn.BurnBridge.sum(d) |> ExBurn.BurnBridge.to_nx() |> Nx.to_number()
+    sum_result =
+      ExBurn.BurnBridge.sum(d) |> ExBurn.BurnBridge.to_nx() |> Nx.squeeze() |> Nx.to_number()
     IO.puts("  sum([[1,2,3],[4,5,6]]): #{sum_result}")
 
-    mean_result = ExBurn.BurnBridge.mean(d) |> ExBurn.BurnBridge.to_nx() |> Nx.to_number()
+    mean_result = ExBurn.BurnBridge.mean(d) |> ExBurn.BurnBridge.to_nx() |> Nx.squeeze() |> Nx.to_number()
     IO.puts("  mean([[1,2,3],[4,5,6]]): #{mean_result}")
 
     # 7. Shape manipulation
@@ -160,7 +161,7 @@ defmodule BurnBridgeOps do
     target = ExBurn.BurnBridge.from_nx(Nx.tensor([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0]]))
 
     ce_result =
-      ExBurn.BurnBridge.cross_entropy(pred, target) |> ExBurn.BurnBridge.to_nx() |> Nx.to_number()
+      ExBurn.BurnBridge.cross_entropy(pred, target) |> ExBurn.BurnBridge.to_nx() |> Nx.squeeze() |> Nx.to_number()
 
     IO.puts("  cross_entropy: #{Float.round(ce_result, 4)}")
 
@@ -168,7 +169,7 @@ defmodule BurnBridgeOps do
     target_mse = ExBurn.BurnBridge.from_nx(Nx.tensor([[1.5, 2.5], [2.5, 3.5]]))
 
     mse_result =
-      ExBurn.BurnBridge.mse(pred_mse, target_mse) |> ExBurn.BurnBridge.to_nx() |> Nx.to_number()
+      ExBurn.BurnBridge.mse(pred_mse, target_mse) |> ExBurn.BurnBridge.to_nx() |> Nx.squeeze() |> Nx.to_number()
 
     IO.puts("  mse: #{Float.round(mse_result, 4)}")
 

@@ -2,7 +2,7 @@ defmodule ExBurn.MixProject do
   use Mix.Project
 
   @app :ex_burn
-  @version "0.5.0"
+  @version "0.6.0"
   @github_url "https://github.com/ohhi-vn/ex_burn"
 
   def project do
@@ -16,7 +16,41 @@ defmodule ExBurn.MixProject do
       package: package(),
       source_url: @github_url,
       docs: docs(),
-      rustler_crates: rustler_crates()
+      rustler_crates: rustler_crates(),
+      dialyzer: dialyzer(),
+      aliases: aliases(),
+      test_coverage: [
+        # ExBurn.Nif's uncovered lines are load-bearing Rustler
+        # declarations — :erlang.nif_error bodies that only execute when
+        # the native library fails to load. Ignore the FFI boundary.
+        ignore_modules: [ExBurn.Nif],
+        # 88 reflects the practical ceiling given structurally
+        # unreachable lines elsewhere:
+        #   * Defn.Compiler: :token/:attach_token/:block/:runtime_call
+        #     dispatch clauses that nx 0.13 no longer emits (kept for
+        #     nx ~> 0.12 compatibility)
+        #   * CubeclBridge: OS-dependent detection branches
+        #     (nvidia-smi probing) and hardware-error fallbacks
+        #   * Backend/BurnBridge/NifHelper: NIF-failure raise branches
+        #     that require fault injection into the native layer
+        summary: [threshold: 88]
+      ]
+    ]
+  end
+
+  defp dialyzer do
+    [
+      # axon structs/types are referenced throughout the model API.
+      plt_add_apps: [:axon, :ex_unit],
+      ignore_warnings: "dialyzer.ignore_warnings.exs",
+      flags: [:unmatched_returns, :error_handling]
+    ]
+  end
+
+  defp aliases do
+    [
+      lint: ["format --check-formatted", "credo"],
+      "lint.all": ["lint", "dialyzer"]
     ]
   end
 
@@ -42,7 +76,10 @@ defmodule ExBurn.MixProject do
       # JSON encoding (used by ExCubecl for kernel params)
       {:jason, "~> 1.4"},
       # Documentation
-      {:ex_doc, "~> 0.40", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.40", only: :dev, runtime: false},
+      # Linting & static analysis
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
     ]
   end
 

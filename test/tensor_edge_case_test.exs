@@ -2,31 +2,29 @@ defmodule ExBurn.TensorEdgeCaseTest do
   use ExUnit.Case
 
   describe "type conversion edge cases" do
-    test "nx_type_to_burn handles all float types" do
-      assert ExBurn.Tensor.nx_type_to_burn({:f, 16}) == :f32
-      assert ExBurn.Tensor.nx_type_to_burn({:bf, 16}) == :f32
+    test "nx_type_to_burn preserves all float types" do
+      assert ExBurn.Tensor.nx_type_to_burn({:f, 16}) == :f16
+      assert ExBurn.Tensor.nx_type_to_burn({:bf, 16}) == :bf16
     end
 
-    test "nx_type_to_burn handles all integer types" do
-      assert ExBurn.Tensor.nx_type_to_burn({:s, 8}) == :i32
-      assert ExBurn.Tensor.nx_type_to_burn({:s, 16}) == :i32
-      assert ExBurn.Tensor.nx_type_to_burn({:u, 8}) == :f32
+    test "nx_type_to_burn preserves all integer types" do
+      assert ExBurn.Tensor.nx_type_to_burn({:s, 8}) == :i8
+      assert ExBurn.Tensor.nx_type_to_burn({:s, 16}) == :i16
+      assert ExBurn.Tensor.nx_type_to_burn({:u, 8}) == :u8
     end
 
-    test "nx_type_to_burn handles unknown types" do
-      assert ExBurn.Tensor.nx_type_to_burn({:u, 32}) == :f32
-      assert ExBurn.Tensor.nx_type_to_burn({:u, 64}) == :f32
-      assert ExBurn.Tensor.nx_type_to_burn(nil) == :f32
+    test "nx_type_to_burn raises on unsupported types" do
+      for bad <- [{:u, 32}, {:u, 64}, nil] do
+        assert_raise(ExBurn.Error, fn -> ExBurn.Tensor.nx_type_to_burn(bad) end)
+      end
     end
 
-    test "burn_type_to_nx handles unknown types" do
-      assert ExBurn.Tensor.burn_type_to_nx(:f16) == {:f, 32}
-      assert ExBurn.Tensor.burn_type_to_nx(:bf16) == {:f, 32}
-      # :i16 and :i8 fall through to the default clause which returns {:f, 32}
-      assert ExBurn.Tensor.burn_type_to_nx(:i16) == {:f, 32}
-      assert ExBurn.Tensor.burn_type_to_nx(:i8) == {:f, 32}
-      assert ExBurn.Tensor.burn_type_to_nx(:u8) == {:f, 32}
-      assert ExBurn.Tensor.burn_type_to_nx(:unknown) == {:f, 32}
+    test "burn_type_to_nx maps all supported burn types" do
+      assert ExBurn.Tensor.burn_type_to_nx(:f16) == {:f, 16}
+      assert ExBurn.Tensor.burn_type_to_nx(:bf16) == {:bf, 16}
+      assert ExBurn.Tensor.burn_type_to_nx(:i16) == {:s, 16}
+      assert ExBurn.Tensor.burn_type_to_nx(:i8) == {:s, 8}
+      assert ExBurn.Tensor.burn_type_to_nx(:u8) == {:u, 8}
     end
 
     test "round-trip conversion for f32" do

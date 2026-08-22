@@ -37,7 +37,7 @@ defmodule ModelManagement do
       |> Axon.dense(5, name: "classifier")
 
     IO.puts("Model architecture:")
-    IO.puts(Axon.Display.display(model, []))
+    IO.inspect(Axon.get_output_shape(model, Nx.template({1, 10}, :f32)), label: "Output shape")
 
     # ── 2. Compile with Adam ────────────────────────────────────
     compiled =
@@ -65,7 +65,7 @@ defmodule ModelManagement do
     IO.puts("  Compiled:         #{info.compiled}\n")
 
     # ── 5. Benchmark forward pass ──────────────────────────────
-    input = Nx.Random.uniform(Nx.Random.key(1), 0.0, 1.0, shape: {1, 10})
+    {input, _key} = Nx.Random.uniform(Nx.Random.key(1), 0.0, 1.0, shape: {1, 10})
     bench = ExBurn.Model.benchmark(compiled, input, warmup: 3, runs: 10)
 
     IO.puts("Benchmark (10 runs, 3 warmup):")

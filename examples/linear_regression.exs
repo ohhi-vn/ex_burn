@@ -44,7 +44,7 @@ defmodule LinearRegression do
       |> Axon.dense(1, use_bias: true, name: "linear")
 
     IO.puts("\nModel:")
-    IO.puts(Axon.Display.display(model, []))
+    IO.inspect(Axon.get_output_shape(model, Nx.template({1, 1}, :f32)), label: "Output shape")
 
     # ── 3. Compile ──────────────────────────────────────────────
     compiled = ExBurn.Model.compile(model,
@@ -55,7 +55,7 @@ defmodule LinearRegression do
 
     IO.puts("Initial prediction (x=1.0):")
     pred0 = predict(compiled, Nx.tensor([[1.0]]))
-    IO.puts("  f(1.0) = #{Float.round(Nx.to_number(pred0), 4)} (expected ≈ 3.0)\n")
+    IO.puts("  f(1.0) = #{pred0 |> Nx.squeeze() |> Nx.to_number() |> Float.round(4)} (expected ≈ 3.0)\n")
 
     # ── 4. Train ────────────────────────────────────────────────
     IO.puts("Training...")
@@ -81,17 +81,17 @@ defmodule LinearRegression do
     IO.puts("\nResults:")
 
     pred_final = predict(trained, Nx.tensor([[1.0]]))
-    IO.puts("  f(1.0) = #{Float.round(Nx.to_number(pred_final), 4)} (expected ≈ 3.0)")
+    IO.puts("  f(1.0) = #{pred_final |> Nx.squeeze() |> Nx.to_number() |> Float.round(4)} (expected ≈ 3.0)")
 
     pred_zero = predict(trained, Nx.tensor([[0.0]]))
-    IO.puts("  f(0.0) = #{Float.round(Nx.to_number(pred_zero), 4)} (expected ≈ 1.0)")
+    IO.puts("  f(0.0) = #{pred_zero |> Nx.squeeze() |> Nx.to_number() |> Float.round(4)} (expected ≈ 1.0)")
 
     pred_neg = predict(trained, Nx.tensor([[-2.0]]))
-    IO.puts("  f(-2.0) = #{Float.round(Nx.to_number(pred_neg), 4)} (expected ≈ -3.0)")
+    IO.puts("  f(-2.0) = #{pred_neg |> Nx.squeeze() |> Nx.to_number() |> Float.round(4)} (expected ≈ -3.0)")
 
     # Compute final MSE
     y_pred = predict_batch(trained, x)
-    mse = Nx.mean(Nx.power(Nx.subtract(y_pred, y), 2.0)) |> Nx.to_number()
+    mse = Nx.mean(Nx.pow(Nx.subtract(y_pred, y), 2.0)) |> Nx.to_number()
     IO.puts("\n  Final MSE: #{Float.round(mse, 6)}")
 
     # Extract learned weights
@@ -105,20 +105,19 @@ defmodule LinearRegression do
 
   defp predict(%ExBurn.Model{params: params}, input) do
     # Forward pass: y = x @ w + b
-    w = params["linear"]["weight"]
-    b = params["linear"]["bias"]
-    Nx.add(Nx.dot(input, w), b)
-  end
-
-  defp predict_batch(%ExBurn.Model{params: params}, input) do
-    w = params["linear"]["weight"]
-    b = params["linear"]["bias"]
+    # Model.params uses flat "layer.param" keys (Axon dense param = "kernel")
+    w = params["linear.kernel"]
+    b = params["linear.bias"]
     Nx.add(Nx.dot(input, Nx.transpose(w)), b)
   end
 
+  defp predict_batch(%ExBurn.Model{params: params}, input) do
+    predict(%ExBurn.Model{params: params}, input)
+  end
+
   defp extract_linear_params(params) do
-    w = params["linear"]["weight"] |> Nx.to_number()
-    b = params["linear"]["bias"] |> Nx.to_number()
+    w = params["linear.kernel"] |> Nx.squeeze() |> Nx.to_number()
+    b = params["linear.bias"] |> Nx.squeeze() |> Nx.to_number()
     {w, b}
   end
 end

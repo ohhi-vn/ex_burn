@@ -104,10 +104,8 @@ defmodule ExBurn.Serving do
   This is a convenience wrapper around `Nx.Serving.run/2`.
   """
   @spec run(t(), Nx.Tensor.t()) :: Nx.Tensor.t()
-  def run(%__MODULE__{serving: nil} = serving, input) do
-    serving
-    |> build()
-    |> Nx.Serving.run(input)
+  def run(%__MODULE__{serving: nil, model: model}, input) do
+    input |> then(&Nx.Serving.run(build(model), &1))
   end
 
   def run(%__MODULE__{serving: serving}, input) when not is_nil(serving) do

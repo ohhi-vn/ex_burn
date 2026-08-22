@@ -15,8 +15,8 @@ Add to `mix.exs`:
 ```elixir
 def deps do
   [
-    {:ex_burn, "~> 0.3"},
-    {:nx, ">= 0.12.0"},
+    {:ex_burn, "~> 0.5"},
+    {:nx, ">= 0.12.0 and < 2.0.0"},
     {:axon, "~> 0.8"},
     {:ex_cubecl, ">= 0.5.0"}
   ]
@@ -25,7 +25,7 @@ end
 
 ```bash
 mix deps.get
-mix compile
+mix compile   # first build compiles the Rust NIF — expect a few minutes
 ```
 
 ### Prerequisites
@@ -34,11 +34,40 @@ mix compile
 |---|---|---|
 | Elixir | ~> 1.18 | |
 | OTP | 27+ | |
-| Rust stable | any | Needed for NIF compilation (until v0.2.0 precompiled binaries) |
+| Rust stable | any | Needed for NIF compilation (until precompiled binaries ship) |
 | GPU drivers | — | CUDA / Metal / Vulkan depending on platform |
 
 For iOS: `rustup target add aarch64-apple-ios`
 For Android: `rustup target add aarch64-linux-android`
+
+The NIF builds **CPU-only by default**. To build with GPU acceleration before
+compiling, run `./build.sh` (auto-detects metal/cuda/vulkan) or set
+`RUSTLER_NIF_CARGO_FEATURES=<backend>`.
+
+### Step-by-Step Verification
+
+Confirm each layer works before moving on:
+
+```elixir
+# 1. Is the NIF loaded and healthy?
+ExBurn.nif_loaded?()
+#=> true
+
+# 2. Does the full Nx → Backend → NIF → Burn pipeline work?
+ExBurn.smoke_test()
+#=> :ok
+
+# 3. What device are we running on?
+ExBurn.summary()
+#=>
+# ExBurn v0.5.0
+# ──────────────────────────────
+# Device: Metal (Apple M2 Pro)     ← or "NdArray (CPU)"
+# GPU: available                   ← CPU-only builds report "not available"
+# Backends: metal
+```
+
+If any step fails, see the [Troubleshooting](#troubleshooting) section below.
 
 ## Basic Tensor Operations
 
@@ -88,13 +117,17 @@ MyMath.add_and_scale(Nx.tensor([1.0, 2.0]), Nx.tensor([3.0, 4.0]), Nx.tensor(2.0
 #=> #Nx.Tensor<[8.0, 12.0]>
 ```
 
-Per-function compiler override:
+Per-function compiler override (no global setting):
 
 ```elixir
-defn my_fun(x, opts \\ []) do
-  Nx.sin(x)
+defmodule MyMath do
+  import Nx.Defn
+
+  defn my_fun(x), do: Nx.sin(x)
 end
-compiler: ExBurn.Defn.Compiler
+
+# Run just this call through the ExBurn compiler
+Nx.Defn.jit_apply(&MyMath.my_fun/1, [x], compiler: ExBurn.Defn.Compiler)
 ```
 
 ## Checking GPU Availability
@@ -167,6 +200,16 @@ native/ex_burn_nif/
   Cargo.toml            — Burn + CubeCL + Autodiff dependencies
 ```
 
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `:erlang.nif_error(:nif_not_loaded)` | Native library wasn't compiled or linked | `mix clean && mix compile`; verify Rust is installed (`cargo --version`) |
+| `dtype :f64 is not supported by the NIF` | A non-f32 dtype crossed the raw NIF boundary (direct `BurnBridge`/`Nif` call) | Use `Nx.as_type(t, {:f, 32})` first, or route through `Nx` ops with `ExBurn.Backend`, which value-converts automatically |
+| `{:error, "Erlang error: :nif_panicked"}` | Rust-side assertion fired (rank/dtype mismatch on a direct NIF call) | Re-run with `RUST_BACKTRACE=1` for a Rust stack trace; check operation constraints in the README |
+| `ExBurn.smoke_test()` returns `{:error, _}` | Pipeline broken at some layer | Re-run after `mix clean && mix compile`; if it persists, open an issue with the error message |
+| GPU shows "not available" but you have one | NIF was built CPU-only | `./build.sh metal` (or cuda/vulkan), then recompile |
+
 ## Next Steps
 
 - [Deep Learning Guide](06_deep_learning_guide.md) — Step-by-step lessons for learning deep learning with ExBurn
@@ -174,3 +217,5 @@ native/ex_burn_nif/
 - [Mobile Deployment](03_mobile_deployment.md) — iOS/Android compilation and optimization
 - [Architecture Deep-Dive](04_architecture.md) — How the pipeline works internally
 - [Training Optimization Guide](05_training_optimization.md) — Best practices for fast, stable training
+- [Benchmarks](07_benchmarks.md) — Performance numbers and how to reproduce them
+- [Contributing](../CONTRIBUTING.md) — Development workflow, testing, adding operations

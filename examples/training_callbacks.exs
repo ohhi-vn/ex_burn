@@ -25,7 +25,7 @@ defmodule TrainingCallbacks do
     IO.puts("=== Training Callbacks with ExBurn ===\n")
 
     # ── 1. Create synthetic classification data ────────────────
-    {train_x, train_y, val_x, val_y} = generate_data(500, 50)
+    {train_x, train_y, val_x, val_y} = generate_data(120, 30)
 
     IO.puts("Dataset:")
 
@@ -37,11 +37,11 @@ defmodule TrainingCallbacks do
     IO.puts("  Classes: 3\n")
 
     # ── 2. Define model ────────────────────────────────────────
+    # Keep the network small: gradients are computed numerically
+    # (2 forward passes per parameter per batch), so large models are slow.
     model =
       Axon.input("input", shape: {nil, 10})
-      |> Axon.dense(32, activation: :relu, name: "hidden1")
-      |> Axon.dropout(rate: 0.2)
-      |> Axon.dense(16, activation: :relu, name: "hidden2")
+      |> Axon.dense(8, activation: :relu, name: "hidden1")
       |> Axon.dense(3, name: "output")
 
     compiled =
@@ -54,12 +54,13 @@ defmodule TrainingCallbacks do
     # ── 3. Train with all callbacks ────────────────────────────
     IO.puts("Training with callbacks...\n")
 
-    history_pid = setup_history()
+    # Simple in-example recorder so we can print the history afterwards
+    {:ok, history_agent} = Agent.start_link(fn -> [] end)
 
     trained =
       ExBurn.Training.fit(compiled, {train_x, train_y},
-        epochs: 50,
-        batch_size: 32,
+        epochs: 15,
+        batch_size: 16,
         validation_data: {val_x, val_y},
         verbose: false,
         lr_schedule: {:cosine, 0.001, 1.0e-5},
@@ -83,7 +84,10 @@ defmodule TrainingCallbacks do
           ExBurn.Training.ReduceLROnPlateauCallback.new(patience: 5, factor: 0.5, min_lr: 1.0e-6),
 
           # Record history
-          ExBurn.Training.HistoryCallback.new(),
+          fn metrics ->
+            Agent.update(history_agent, &[metrics | &1])
+            metrics
+          end,
 
           # Custom callback: print a message at epoch 25
           fn
@@ -99,7 +103,8 @@ defmodule TrainingCallbacks do
 
     # ── 4. Review history ──────────────────────────────────────
     IO.puts("\nTraining history (last 5 epochs):")
-    history = ExBurn.Training.HistoryCallback.get_history(history_pid)
+
+    history = Agent.get(history_agent, &Enum.reverse/1)
 
     history
     |> Enum.take(5)
@@ -107,7 +112,7 @@ defmodule TrainingCallbacks do
       epoch = m.epoch
       loss = Float.round(m.loss, 4)
       val_loss = if m.val_loss, do: Float.round(m.val_loss, 4), else: "N/A"
-      acc = if m.accuracy, do: "#{Float.round(m.accuracy * 100, 1)}%", else: "N/A"
+      acc = if m[:accuracy], do: "#{Float.round(m.accuracy * 100, 1)}%", else: "N/A"
 
       IO.puts(
         "  Epoch #{String.pad_leading("#{epoch}", 2)}: loss=#{loss} val_loss=#{val_loss} acc=#{acc}"
@@ -147,26 +152,22 @@ defmodule TrainingCallbacks do
     train_labels = Nx.as_type(train_labels, {:s, 64})
     train_y = ExBurn.Dataset.one_hot(train_labels, num_classes: num_classes)
 
-    # Add class-specific signal
-    signal = Nx.multiply(train_y, 0.5)
-    signal = Nx.slice(signal, [0, 0], [n_train, input_dim])
-    train_x = Nx.add(train_x, signal)
+    # Add class-specific signal: each class shifts inputs by its own vector,
+    # so the classes are linearly separable.
+    {class_vectors, key} = Nx.Random.normal(key, 0.0, 0.5, shape: {num_classes, input_dim})
+
+    train_x = Nx.add(train_x, Nx.take(class_vectors, train_labels))
 
     # Validation data
     {val_x, _key} = Nx.Random.normal(key, 0.0, 1.0, shape: {n_val, input_dim})
     {val_labels, _key} = Nx.Random.uniform(key, 0, num_classes - 0.001, shape: {n_val})
     val_labels = Nx.as_type(val_labels, {:s, 64})
     val_y = ExBurn.Dataset.one_hot(val_labels, num_classes: num_classes)
-    val_signal = Nx.multiply(val_y, 0.5) |> Nx.slice([0, 0], [n_val, input_dim])
-    val_x = Nx.add(val_x, val_signal)
+    val_x = Nx.add(val_x, Nx.take(class_vectors, val_labels))
 
     {train_x, train_y, val_x, val_y}
   end
 
-  defp setup_history do
-    {:ok, pid} = Agent.start_link(fn -> [] end)
-    pid
-  end
 end
 
 TrainingCallbacks.run()

@@ -40,6 +40,8 @@ defmodule ExBurn.Training do
 
   alias ExBurn.Model
 
+  require Logger
+
   @type model :: ExBurn.Model.t()
   @type dataset :: {Nx.Tensor.t(), Nx.Tensor.t()}
   @type callback :: (map() -> map())
@@ -62,7 +64,6 @@ defmodule ExBurn.Training do
           accumulate_gradients: pos_integer(),
           accuracy: boolean(),
           nesterov: boolean(),
-          warmup: pos_integer(),
           grad_method: atom(),
           set_default_backend?: boolean()
         ]
@@ -111,6 +112,17 @@ defmodule ExBurn.Training do
     grad_method = Keyword.get(opts, :grad_method, :numerical)
     set_default_backend = Keyword.get(opts, :set_default_backend?, false)
 
+    epoch_cfg = %{
+      batch_size: batch_size,
+      clip_norm: clip_norm,
+      clip_value: clip_value,
+      weight_decay: weight_decay,
+      accumulate: accumulate,
+      track_accuracy: track_accuracy,
+      shuffle: shuffle,
+      grad_method: grad_method
+    }
+
     num_samples = Nx.shape(inputs) |> elem(0)
     num_batches = ceil(num_samples / batch_size)
 
@@ -132,9 +144,12 @@ defmodule ExBurn.Training do
 
       if verbose do
         effective_bs = batch_size * accumulate
-        IO.puts("Training: #{num_samples} samples, #{num_batches} batches/epoch, #{epochs} epochs")
 
-        IO.puts(
+        Logger.info(
+          "Training: #{num_samples} samples, #{num_batches} batches/epoch, #{epochs} epochs"
+        )
+
+        Logger.info(
           "  batch_size=#{batch_size}, effective_batch_size=#{effective_bs}, optimizer=#{model.optimizer}"
         )
 
@@ -148,13 +163,13 @@ defmodule ExBurn.Training do
           |> Enum.reject(&is_nil/1)
           |> Enum.join(", ")
 
-        if opts_summary != "", do: IO.puts("  #{opts_summary}")
+        if opts_summary != "", do: Logger.info("  #{opts_summary}")
       end
 
       start_time = System.monotonic_time(:millisecond)
 
       {trained_model, _final_metrics} =
-        Enum.reduce_while({1, epochs}, {model, %{}}, fn epoch, {model, _metrics} ->
+        Enum.reduce_while(1..epochs, {model, %{}}, fn epoch, {model, _metrics} ->
           epoch_start = System.monotonic_time(:millisecond)
 
           # Apply learning rate schedule
@@ -162,20 +177,7 @@ defmodule ExBurn.Training do
 
           # Train one epoch
           {epoch_loss, epoch_correct, epoch_total, model} =
-            train_epoch(
-              model,
-              inputs,
-              targets,
-              batch_size,
-              num_batches,
-              clip_norm,
-              clip_value,
-              weight_decay,
-              accumulate,
-              track_accuracy,
-              shuffle,
-              grad_method
-            )
+            train_epoch(model, inputs, targets, epoch_cfg)
 
           epoch_elapsed = System.monotonic_time(:millisecond) - epoch_start
           total_elapsed = System.monotonic_time(:millisecond) - start_time
@@ -222,6 +224,10 @@ defmodule ExBurn.Training do
 
                 {val_loss, val_acc} ->
                   Map.put(metrics, :val_loss, val_loss) |> Map.put(:val_accuracy, val_acc)
+
+                # evaluate/3 returns a bare loss when track_accuracy is false
+                val_loss when is_number(val_loss) ->
+                  Map.put(metrics, :val_loss, val_loss)
               end
             else
               metrics
@@ -233,6 +239,10 @@ defmodule ExBurn.Training do
 
           # Run callbacks — each callback receives and returns the metrics map
           metrics = Enum.reduce(callbacks, metrics, fn callback, acc -> callback.(acc) end)
+
+          # Callbacks may replace the model (e.g. LR scheduling callbacks
+          # update the learning rate) — adopt the updated model if present.
+          model = Map.get(metrics, :model, model)
 
           # Check for early stopping
           if Map.get(metrics, :stop_training) do
@@ -305,10 +315,13 @@ defmodule ExBurn.Training do
 
   Supports multiple gradient computation methods via the `:grad_method` option:
 
-    * `:autodiff` — Burn Autodiff backward pass (default, fast, exact gradients)
-    * `:numerical` — Central finite differences (slow but general)
-    * `:numerical_batch` — Numerical gradients computed on the full batch at once
-      (more efficient, fewer forward passes)
+    * `:numerical` — Central finite differences (default; slow but general).
+      Requires **2 forward passes per parameter element** per batch, so it is
+      only practical for very small models.
+    * `:numerical_batch` — One-sided finite differences computed against a
+      single base loss. Roughly 2x faster than `:numerical` but less accurate.
+    * `:autodiff` — Burn Autodiff backward pass. **Not yet implemented**;
+      selecting it currently falls back to `:numerical` with a warning.
 
   ## Parameters
 
@@ -371,8 +384,8 @@ defmodule ExBurn.Training do
     clip_value = Keyword.get(opts, :clip_value)
     weight_decay = Keyword.get(opts, :weight_decay, model.weight_decay)
 
-    # Forward pass timing
-    {pred, forward_time} =
+    # Forward pass timing (:timer.tc returns {time, value})
+    {forward_time, pred} =
       :timer.tc(fn ->
         {:ok, p} = Model.predict(model, batch_in)
         p
@@ -383,7 +396,7 @@ defmodule ExBurn.Training do
     loss_val = Nx.to_number(loss)
 
     # Backward pass timing
-    {grads, backward_time} =
+    {backward_time, grads} =
       :timer.tc(fn ->
         compute_gradients(model, {batch_in, batch_tgt}, opts)
       end)
@@ -403,7 +416,7 @@ defmodule ExBurn.Training do
       |> maybe_clip_by_value(clip_value)
 
     # Optimizer step timing
-    {updated_model, optimizer_time} =
+    {optimizer_time, updated_model} =
       :timer.tc(fn ->
         optimizer_step(model, grads)
       end)
@@ -431,6 +444,14 @@ defmodule ExBurn.Training do
   def evaluate(%Model{} = model, {inputs, targets}, track_accuracy \\ false) do
     num_samples = Nx.shape(inputs) |> elem(0)
 
+    if num_samples == 0 do
+      if track_accuracy, do: {0.0, nil}, else: 0.0
+    else
+      do_evaluate(model, inputs, targets, num_samples, track_accuracy)
+    end
+  end
+
+  defp do_evaluate(%Model{} = model, inputs, targets, num_samples, track_accuracy) do
     # Process in batches to avoid OOM
     batch_size = min(256, num_samples)
     num_full_batches = div(num_samples, batch_size)
@@ -439,8 +460,8 @@ defmodule ExBurn.Training do
     # Process full batches
     {total_loss, total_correct, total_count, total_samples} =
       Enum.reduce(0..(num_full_batches - 1), {0.0, 0, 0, 0}, fn batch_idx,
-                                                             {loss_acc, correct_acc, count_acc,
-                                                              sample_acc} ->
+                                                                {loss_acc, correct_acc, count_acc,
+                                                                 sample_acc} ->
         start_idx = batch_idx * batch_size
         actual_bs = batch_size
 
@@ -458,7 +479,8 @@ defmodule ExBurn.Training do
             {0, 0}
           end
 
-        {loss_acc + loss_val * count, correct_acc + correct, count_acc + count, sample_acc + count}
+        {loss_acc + loss_val * actual_bs, correct_acc + correct, count_acc + count,
+         sample_acc + actual_bs}
       end)
 
     # Handle last partial batch
@@ -481,8 +503,8 @@ defmodule ExBurn.Training do
             {0, 0}
           end
 
-        {total_loss + loss_val * count, total_correct + correct, total_count + count,
-         total_samples + count}
+        {total_loss + loss_val * actual_bs, total_correct + correct, total_count + count,
+         total_samples + actual_bs}
       else
         {total_loss, total_correct, total_count, total_samples}
       end
@@ -560,24 +582,12 @@ defmodule ExBurn.Training do
 
   # ── Epoch Training ───────────────────────────────────────────────
 
-  defp train_epoch(
-         model,
-         inputs,
-         targets,
-         batch_size,
-         _num_batches,
-         clip_norm,
-         clip_value,
-         weight_decay,
-         accumulate,
-         track_accuracy,
-         shuffle,
-         grad_method
-       ) do
+  defp train_epoch(model, inputs, targets, cfg) do
     num_samples = Nx.shape(inputs) |> elem(0)
+    batch_size = cfg.batch_size
 
     indices =
-      if shuffle do
+      if cfg.shuffle do
         Enum.shuffle(0..(num_samples - 1))
       else
         Enum.to_list(0..(num_samples - 1))
@@ -587,68 +597,22 @@ defmodule ExBurn.Training do
 
     # Process batches with gradient accumulation
     {total_loss, total_correct, total_count, model} =
-      accumulate_batches(
-        batches,
-        inputs,
-        targets,
-        model,
-        clip_norm,
-        clip_value,
-        weight_decay,
-        accumulate,
-        track_accuracy,
-        grad_method,
-        {0.0, 0, 0, model}
-      )
+      accumulate_batches(batches, inputs, targets, model, cfg, {0.0, 0, 0, model})
 
     {total_loss, total_correct, total_count, model}
   end
 
   # Process batches with gradient accumulation
-  defp accumulate_batches(
-         [],
-         _inputs,
-         _targets,
-         model,
-         _clip_norm,
-         _clip_value,
-         _weight_decay,
-         _accumulate,
-         _track_acc,
-         _grad_method,
-         {loss, correct, count, model}
-       ) do
+  defp accumulate_batches([], _inputs, _targets, model, _cfg, {loss, correct, count, model}) do
     {loss, correct, count, model}
   end
 
-  defp accumulate_batches(
-         batches,
-         inputs,
-         targets,
-         model,
-         clip_norm,
-         clip_value,
-         weight_decay,
-         accumulate,
-         track_accuracy,
-         grad_method,
-         acc
-       ) do
-    # Take up to `accumulate` batches
-    {to_process, remaining} = Enum.split(batches, accumulate)
+  defp accumulate_batches(batches, inputs, targets, model, cfg, acc) do
+    # Take up to `accumulate` batches per optimizer step
+    {to_process, remaining} = Enum.split(batches, cfg.accumulate)
 
     {batch_loss, batch_correct, batch_count, updated_model} =
-      process_accumulated_batches(
-        to_process,
-        inputs,
-        targets,
-        model,
-        clip_norm,
-        clip_value,
-        weight_decay,
-        track_accuracy,
-        grad_method
-      )
+      process_accumulated_batches(to_process, inputs, targets, model, cfg)
 
     {loss, correct, count, _old_model} = acc
 
@@ -657,28 +621,18 @@ defmodule ExBurn.Training do
       inputs,
       targets,
       updated_model,
-      clip_norm,
-      clip_value,
-      weight_decay,
-      accumulate,
-      track_accuracy,
-      grad_method,
+      cfg,
       {loss + batch_loss, correct + batch_correct, count + batch_count, updated_model}
     )
   end
 
   # Process a group of accumulated batches: average their gradients, then step
-  defp process_accumulated_batches(
-         batch_indices_list,
-         inputs,
-         targets,
-         model,
-         clip_norm,
-         clip_value,
-         weight_decay,
-         track_accuracy,
-         grad_method \\ :numerical
-       ) do
+  defp process_accumulated_batches(batch_indices_list, inputs, targets, model, cfg) do
+    track_accuracy = cfg.track_accuracy
+    grad_method = cfg.grad_method
+    clip_norm = cfg.clip_norm
+    clip_value = cfg.clip_value
+    weight_decay = cfg.weight_decay
     num_batches = length(batch_indices_list)
 
     {total_loss, total_correct, total_count, accumulated_grads, model} =
@@ -795,7 +749,9 @@ defmodule ExBurn.Training do
       end)
 
     grad_binary =
-      Enum.map(grad_data, fn val -> <<val::float-32-little>> end) |> :erlang.list_to_binary()
+      grad_data
+      |> Enum.map(fn val -> <<val::float-32-little>> end)
+      |> :erlang.list_to_binary()
 
     grad_flat = Nx.from_binary(grad_binary, :f32)
     Nx.reshape(grad_flat, shape)
@@ -861,27 +817,32 @@ defmodule ExBurn.Training do
     # The ExBurn.Defn.Compiler translates the defn graph to Burn
     # Autodiff tensors, which track gradients automatically.
 
-    Nx.default_backend(ExBurn.Backend)
-
     # Sort params by key for deterministic ordering
     sorted_params = Enum.sort_by(params, fn {k, _} -> k end)
     param_keys = Enum.map(sorted_params, fn {k, _} -> k end)
     param_values = Enum.map(sorted_params, fn {_, v} -> v end)
 
+    # The backend switch must not leak into the numerical fallback: predict
+    # relies on regular Nx tensors, so restore the caller's backend first.
+    previous_backend = Nx.default_backend()
+
     try do
       autodiff_gradients(model, input, target, param_keys, param_values)
     rescue
       e ->
-        require Logger
-
         Logger.warning(
           "Autodiff gradient failed: #{Exception.message(e)}. Falling back to numerical."
         )
 
         compute_gradients_numerical(model, input, target, 1.0e-5)
+    after
+      Nx.default_backend(previous_backend)
     end
   end
 
+  # Returns {:ok, grads} or raises — the raise is caught by
+  # compute_gradients_autodiff/3 and converted into a numerical fallback.
+  @spec autodiff_gradients(term(), term(), term(), [term()], [term()]) :: no_return()
   defp autodiff_gradients(_model, _input, _target, _param_keys, _param_values) do
     # Autodiff gradient computation through Burn's autodiff backend.
     #
@@ -932,7 +893,7 @@ defmodule ExBurn.Training do
 
   defp maybe_clip_by_norm(grads, nil), do: grads
 
-  defp maybe_clip_by_norm(grads, max_norm) when is_float(max_norm) do
+  defp maybe_clip_by_norm(grads, max_norm) when is_number(max_norm) do
     # Compute total norm across all gradient tensors
     total_norm_sq =
       Enum.reduce(grads, 0.0, fn {_key, grad}, acc ->
@@ -952,7 +913,7 @@ defmodule ExBurn.Training do
 
   defp maybe_clip_by_value(grads, nil), do: grads
 
-  defp maybe_clip_by_value(grads, max_val) when is_float(max_val) do
+  defp maybe_clip_by_value(grads, max_val) when is_number(max_val) do
     Enum.map(grads, fn {key, grad} -> {key, Nx.clip(grad, -max_val, max_val)} end)
     |> Map.new()
   end
@@ -1110,31 +1071,7 @@ defmodule ExBurn.Training do
 
   # ── Progress Printing ────────────────────────────────────────────
 
-  defp print_progress(%{epoch: epoch, loss: loss, val_loss: nil} = metrics, num_samples, epoch_ms) do
-    samples_per_sec = num_samples / max(epoch_ms, 1) * 1000
-    base = "Epoch #{epoch}: loss=#{:erlang.float_to_binary(loss, decimals: 4)}"
-
-    base =
-      if Map.has_key?(metrics, :accuracy) do
-        acc = Map.get(metrics, :accuracy)
-        base <> " acc=#{:erlang.float_to_binary(acc * 100, decimals: 1)}%"
-      else
-        base
-      end
-
-    base = base <> " (#{round(samples_per_sec)} samples/s, #{epoch_ms}ms)"
-
-    base =
-      if Map.has_key?(metrics, :eta_ms) do
-        eta_sec = round(Map.get(metrics, :eta_ms) / 1000)
-        base <> " ETA=#{format_duration(eta_sec)}"
-      else
-        base
-      end
-
-    IO.puts(base)
-  end
-
+  # With validation loss (clause ordered first so it wins over the general one)
   defp print_progress(
          %{epoch: epoch, loss: loss, val_loss: val_loss} = metrics,
          num_samples,
@@ -1161,17 +1098,35 @@ defmodule ExBurn.Training do
         base
       end
 
-    base = base <> " (#{round(samples_per_sec)} samples/s, #{epoch_ms}ms)"
+    Logger.info(with_common_suffix(base, metrics, samples_per_sec, epoch_ms))
+  end
+
+  # Without validation loss
+  defp print_progress(%{epoch: epoch, loss: loss} = metrics, num_samples, epoch_ms) do
+    samples_per_sec = num_samples / max(epoch_ms, 1) * 1000
+
+    base = "Epoch #{epoch}: loss=#{:erlang.float_to_binary(loss, decimals: 4)}"
 
     base =
-      if Map.has_key?(metrics, :eta_ms) do
-        eta_sec = round(Map.get(metrics, :eta_ms) / 1000)
-        base <> " ETA=#{format_duration(eta_sec)}"
+      if Map.has_key?(metrics, :accuracy) do
+        acc = Map.get(metrics, :accuracy)
+        base <> " acc=#{:erlang.float_to_binary(acc * 100, decimals: 1)}%"
       else
         base
       end
 
-    IO.puts(base)
+    Logger.info(with_common_suffix(base, metrics, samples_per_sec, epoch_ms))
+  end
+
+  defp with_common_suffix(base, metrics, samples_per_sec, epoch_ms) do
+    base = base <> " (#{round(samples_per_sec)} samples/s, #{epoch_ms}ms)"
+
+    if Map.has_key?(metrics, :eta_ms) do
+      eta_sec = round(Map.get(metrics, :eta_ms) / 1000)
+      base <> " ETA=#{format_duration(eta_sec)}"
+    else
+      base
+    end
   end
 
   defp format_duration(seconds) when seconds < 60, do: "#{seconds}s"
@@ -1202,7 +1157,7 @@ defmodule ExBurn.Training do
           acc -> msg <> " acc=#{:erlang.float_to_binary(acc * 100, decimals: 1)}%"
         end
 
-      IO.puts(msg)
+      Logger.info(msg)
       metrics
     end
   end
@@ -1212,24 +1167,29 @@ defmodule ExBurn.Training do
 
     @spec wait(pos_integer(), float()) :: (map() -> map())
     def wait(patience, min_delta \\ 1.0e-4) do
-      parent = self()
-
       {:ok, pid} =
         Agent.start_link(fn -> %{best_loss: :infinity, wait: 0, epoch: 0} end)
 
+      # The Agent is linked to the calling process, so its state is cleaned
+      # up automatically when the caller terminates.
       fn
         %{val_loss: val_loss, epoch: epoch} = metrics ->
           state = Agent.get(pid, & &1)
 
-          if val_loss < state.best_loss - min_delta do
+          improved? =
+            case state.best_loss do
+              :infinity -> true
+              best -> val_loss < best - min_delta
+            end
+
+          if improved? do
             Agent.update(pid, fn _ -> %{best_loss: val_loss, wait: 0, epoch: epoch} end)
             metrics
           else
             new_wait = state.wait + 1
 
             if new_wait >= patience do
-              IO.puts("Early stopping at epoch #{epoch} (best: epoch #{state.epoch})")
-              send(parent, {:early_stop, epoch})
+              Logger.warning("Early stopping at epoch #{epoch} (best: epoch #{state.epoch})")
               Map.put(metrics, :stop_training, true)
             else
               Agent.update(pid, fn s -> %{s | wait: new_wait} end)
@@ -1254,7 +1214,7 @@ defmodule ExBurn.Training do
         %{epoch: epoch, model: model} = metrics when rem(epoch, interval) == 0 ->
           path = Path.join(dir, "checkpoint_epoch_#{epoch}.model")
           ExBurn.Model.save(model, path)
-          IO.puts("Checkpoint saved: #{path}")
+          Logger.info("Checkpoint saved: #{path}")
           metrics
 
         metrics ->
@@ -1339,7 +1299,9 @@ defmodule ExBurn.Training do
               new_lr = max(current_lr * factor, state.min_lr)
 
               if new_lr < current_lr do
-                IO.puts("Reducing LR: #{Float.round(current_lr, 6)} → #{Float.round(new_lr, 6)}")
+                Logger.info(
+                  "Reducing LR: #{Float.round(current_lr, 6)} → #{Float.round(new_lr, 6)}"
+                )
 
                 updated_model = %{
                   model
@@ -1375,10 +1337,11 @@ defmodule ExBurn.Training do
         callbacks: [
           ExBurn.Training.HistoryCallback.new()
         ]
-
     Access the history after training:
 
-        history = ExBurn.Training.HistoryCallback.get_history()
+        history = ExBurn.Training.HistoryCallback.get_history(pid)
+
+    The `:history_pid` key is added to the metrics map by `new/0`.
     """
 
     @spec new() :: (map() -> map())
@@ -1389,12 +1352,6 @@ defmodule ExBurn.Training do
         Agent.update(pid, fn history -> [metrics | history] end)
         Map.put(metrics, :history_pid, pid)
       end
-    end
-
-    @spec get_history() :: [map()]
-    def get_history() do
-      # This is a simplified version — in practice you'd pass the pid
-      []
     end
 
     @spec get_history(pid()) :: [map()]

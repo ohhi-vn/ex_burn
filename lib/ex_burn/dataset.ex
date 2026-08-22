@@ -49,6 +49,7 @@ defmodule ExBurn.Dataset do
     indices =
       if shuffle do
         if seed, do: :rand.seed(:exsss, seed)
+
         Enum.shuffle(0..(num_samples - 1))
       else
         Enum.to_list(0..(num_samples - 1))

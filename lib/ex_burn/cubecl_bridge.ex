@@ -43,6 +43,10 @@ defmodule ExBurn.CubeclBridge do
       end
   """
 
+  # ExCubecl is an optional dependency — check before any direct call.
+  @compile {:no_warn_undefined, ExCubecl}
+  defp cubecl_loaded?, do: Code.ensure_loaded?(ExCubecl)
+
   @type backend :: :cuda | :metal | :vulkan | :wgpu | :rocm
   @type context :: reference()
   @type kernel :: atom()
@@ -56,7 +60,7 @@ defmodule ExBurn.CubeclBridge do
   Checks whether a GPU device is available via ExCubecl.
   """
   @spec available?() :: boolean()
-  def available?, do: ExCubecl.available?()
+  def available?, do: cubecl_loaded?() and ExCubecl.available?()
 
   @doc """
   Initializes a GPU compute context for the given backend.
@@ -72,17 +76,19 @@ defmodule ExBurn.CubeclBridge do
   """
   @spec init(backend(), keyword()) :: {:ok, context()} | {:error, String.t()}
   def init(_backend, _opts \\ []) do
-    if ExCubecl.available?() do
+    if cubecl_loaded?() and ExCubecl.available?() do
       {:ok, make_ref()}
     else
-      {:error, "No GPU device available"}
+      {:error, "No GPU device available (ExCubecl not loaded or no device)"}
     end
   end
 
   @doc """
   Returns the capabilities of the GPU device.
   """
-  @spec device_capabilities(context()) :: map()
+  # The context is accepted for API symmetry but unused: capabilities come
+  # from ExCubecl's global device info.
+  @spec device_capabilities(term()) :: map()
   def device_capabilities(_ctx) do
     case ExCubecl.device_info() do
       {:ok, info} ->
@@ -192,7 +198,7 @@ defmodule ExBurn.CubeclBridge do
                 {:ok, shape} ->
                   dtype_str = ExCubecl.dtype(first) |> elem(1)
                   dtype = String.to_existing_atom(dtype_str)
-                  {:ok, buf} = ExCubecl.buffer(<<>>, shape, dtype)
+                  {:ok, buf} = ExCubecl.buffer(zero_bytes(shape, dtype), shape, dtype)
                   buf
 
                 _ ->
@@ -300,14 +306,22 @@ defmodule ExBurn.CubeclBridge do
   @spec allocate_gpu(context(), [non_neg_integer()], atom()) ::
           {:ok, buffer()} | {:error, String.t()}
   def allocate_gpu(_ctx, shape, type) do
-    # Allocate an empty buffer; data is zero-initialized by ExCubecl
-    dtype_str = Atom.to_string(type)
-    ExCubecl.buffer(<<>>, shape, String.to_atom(dtype_str))
-  rescue
-    ArgumentError ->
-      # Fallback: try with string type
-      ExCubecl.buffer(<<>>, shape, Atom.to_string(type))
+    # ExCubecl validates byte count against shape × dtype — hand it
+    # zero-initialized storage instead of an empty binary.
+    case ExCubecl.buffer(zero_bytes(shape, type), shape, type) do
+      {:ok, buf} -> {:ok, buf}
+      {:error, reason} -> {:error, to_string(reason)}
+    end
   end
+
+  @dtype_byte_sizes %{f32: 4, f64: 8, s32: 4, s64: 8, u32: 4, u8: 1}
+
+  defp zero_bytes(shape, type) when is_list(shape) do
+    size = Map.get(@dtype_byte_sizes, type, 4)
+    :binary.copy(<<0>>, size * Enum.product(shape))
+  end
+
+  defp zero_bytes(shape, type), do: zero_bytes(Tuple.to_list(shape), type)
 
   @doc """
   Copies data from host (CPU) to a new GPU buffer.
@@ -324,26 +338,15 @@ defmodule ExBurn.CubeclBridge do
   @spec host_to_device(context(), Nx.Tensor.t()) ::
           {:ok, buffer()} | {:error, String.t()}
   def host_to_device(_ctx, %Nx.Tensor{} = tensor) do
-    shape = Nx.shape(tensor)
-    type = Nx.type(tensor)
+    shape = Nx.shape(tensor) |> Tuple.to_list()
     binary = Nx.to_binary(tensor)
-    dtype_str = Atom.to_string(type)
+    # ExCubecl expects atom dtype tags (:f32), not Nx type tuples.
+    dtype = Nx.type(tensor) |> ExBurn.Tensor.nx_to_burn()
 
-    case ExCubecl.buffer(binary, shape, String.to_atom(dtype_str)) do
+    case ExCubecl.buffer(binary, shape, dtype) do
       {:ok, buf} -> {:ok, buf}
       {:error, reason} -> {:error, to_string(reason)}
     end
-  rescue
-    ArgumentError ->
-      # Fallback: try with string type
-      case ExCubecl.buffer(
-             Nx.to_binary(tensor),
-             Nx.shape(tensor),
-             Atom.to_string(Nx.type(tensor))
-           ) do
-        {:ok, buf} -> {:ok, buf}
-        {:error, reason} -> {:error, to_string(reason)}
-      end
   end
 
   @doc """
@@ -365,7 +368,7 @@ defmodule ExBurn.CubeclBridge do
          {:ok, shape} <- ExCubecl.shape(buf),
          {:ok, dtype_str} <- ExCubecl.dtype(buf) do
       type = String.to_existing_atom(dtype_str)
-      {:ok, Nx.from_binary(binary, type) |> Nx.reshape(shape)}
+      {:ok, Nx.from_binary(binary, type) |> Nx.reshape(List.to_tuple(shape))}
     else
       {:error, reason} -> {:error, to_string(reason)}
     end
@@ -374,7 +377,7 @@ defmodule ExBurn.CubeclBridge do
       # If the dtype atom doesn't exist, fall back to f32
       with {:ok, binary} <- ExCubecl.read(buf),
            {:ok, shape} <- ExCubecl.shape(buf) do
-        {:ok, Nx.from_binary(binary, :f32) |> Nx.reshape(shape)}
+        {:ok, Nx.from_binary(binary, :f32) |> Nx.reshape(List.to_tuple(shape))}
       else
         {:error, reason} -> {:error, to_string(reason)}
       end
@@ -516,16 +519,18 @@ defmodule ExBurn.CubeclBridge do
   """
   @spec available_backends() :: [backend()]
   def available_backends do
-    if not ExCubecl.available?() do
+    if cubecl_loaded?() and ExCubecl.available?() do
       []
+      |> append_if(cuda_detected?(), :cuda)
+      |> append_if(metal_detected?(), :metal)
+      |> append_if(vulkan_detected?(), :vulkan)
     else
-      backends = []
-      backends = backends ++ if cuda_detected?(), do: [:cuda], else: []
-      backends = backends ++ if metal_detected?(), do: [:metal], else: []
-      backends = backends ++ if vulkan_detected?(), do: [:vulkan], else: []
-      backends
+      []
     end
   end
+
+  defp append_if(list, true, item), do: list ++ [item]
+  defp append_if(list, false, _item), do: list
 
   @doc """
   Returns a human-readable summary of the GPU device.
@@ -545,7 +550,7 @@ defmodule ExBurn.CubeclBridge do
         if match?({:ok, _}, init(hd(backends))), do: device_capabilities(hd(backends)), else: %{}
 
       info = [
-        "GPU Backends: #{Enum.join(Enum.map(backends, &Atom.to_string/1), ", ")}",
+        "GPU Backends: #{Enum.map_join(backends, ", ", &Atom.to_string/1)}",
         "Device: #{Map.get(caps, :device_name, "Unknown")}",
         "Max Workgroup Size: #{Map.get(caps, :max_workgroup_size, "N/A")}",
         "Shared Memory: #{Map.get(caps, :max_shared_memory, "N/A")} bytes",

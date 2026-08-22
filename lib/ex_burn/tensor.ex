@@ -5,23 +5,36 @@ defmodule ExBurn.Tensor do
   Handles marshaling of tensor data between Elixir's Nx tensor
   representation and the Rust/Burn tensor references used by the NIF.
 
+  This module is the **single source of truth** for Nx ↔ Burn dtype
+  mapping. Do not duplicate these conversions elsewhere.
+
   ## Type Mapping
 
-  | Nx Type    | Burn Type |
-  |------------|-----------|
-  | `{:f, 32}` | `:f32`    |
-  | `{:f, 64}` | `:f64`    |
-  | `{:f, 16}` | `:f32`    |
-  | `{:bf, 16}`| `:f32`    |
-  | `{:s, 32}` | `:i32`    |
-  | `{:s, 64}` | `:i64`    |
-  | `{:s, 16}` | `:i32`    |
-  | `{:s, 8}`  | `:i32`    |
-  | `{:u, 8}`  | `:f32`    |
+  | Nx Type     | Burn Type |
+  |-------------|-----------|
+  | `{:f, 32}`  | `:f32`    |
+  | `{:f, 64}`  | `:f64`    |
+  | `{:f, 16}`  | `:f16`    |
+  | `{:bf, 16}` | `:bf16`   |
+  | `{:s, 32}`  | `:i32`    |
+  | `{:s, 64}`  | `:i64`    |
+  | `{:s, 16}`  | `:i16`    |
+  | `{:s, 8}`   | `:i8`     |
+  | `{:u, 8}`   | `:u8`     |
+
+  > #### Note {: .warning}
+  >
+  > The mapping above is *faithful*, but the current NIF layer only
+  > stores `:f32` data. Creating a tensor with any other dtype raises
+  > a structured `ExBurn.Error` at the NIF boundary rather than
+  > silently reinterpreting bytes.
   """
 
+  alias ExBurn.Error
+
   @typedoc "Burn element type tag"
-  @type burn_type :: :f32 | :f64 | :i32 | :i64
+  @type burn_type ::
+          :f32 | :f64 | :f16 | :bf16 | :i32 | :i64 | :i16 | :i8 | :u8
 
   @typedoc "NIF tensor reference"
   @type t :: %__MODULE__{
@@ -34,28 +47,42 @@ defmodule ExBurn.Tensor do
 
   # ── Type Conversions ─────────────────────────────────────────────
 
-  @doc "Converts an Nx type tuple to a Burn type tag."
-  @spec nx_type_to_burn(Nx.Type.t()) :: burn_type()
-  def nx_type_to_burn(type)
-  def nx_type_to_burn({:f, 32}), do: :f32
-  def nx_type_to_burn({:f, 64}), do: :f64
-  def nx_type_to_burn({:f, 16}), do: :f32
-  def nx_type_to_burn({:bf, 16}), do: :f32
-  def nx_type_to_burn({:s, 32}), do: :i32
-  def nx_type_to_burn({:s, 64}), do: :i64
-  def nx_type_to_burn({:s, 16}), do: :i32
-  def nx_type_to_burn({:s, 8}), do: :i32
-  def nx_type_to_burn({:u, 8}), do: :f32
-  def nx_type_to_burn(_), do: :f32
+  @doc "Converts an Nx type tuple to a Burn type tag (faithful, no precision loss)."
+  @spec nx_to_burn(Nx.Type.t()) :: burn_type()
+  def nx_to_burn(type)
+  def nx_to_burn({:f, 32}), do: :f32
+  def nx_to_burn({:f, 64}), do: :f64
+  def nx_to_burn({:f, 16}), do: :f16
+  def nx_to_burn({:bf, 16}), do: :bf16
+  def nx_to_burn({:s, 32}), do: :i32
+  def nx_to_burn({:s, 64}), do: :i64
+  def nx_to_burn({:s, 16}), do: :i16
+  def nx_to_burn({:s, 8}), do: :i8
+  def nx_to_burn({:u, 8}), do: :u8
+
+  def nx_to_burn(other),
+    do: raise(Error, op: :nx_to_burn, reason: "Nx type #{inspect(other)} not supported")
 
   @doc "Converts a Burn type tag back to an Nx type tuple."
-  @spec burn_type_to_nx(burn_type()) :: Nx.Type.t()
-  def burn_type_to_nx(type)
-  def burn_type_to_nx(:f32), do: {:f, 32}
-  def burn_type_to_nx(:f64), do: {:f, 64}
-  def burn_type_to_nx(:i32), do: {:s, 32}
-  def burn_type_to_nx(:i64), do: {:s, 64}
-  def burn_type_to_nx(_), do: {:f, 32}
+  @spec burn_to_nx(burn_type()) :: Nx.Type.t()
+  def burn_to_nx(type)
+  def burn_to_nx(:f32), do: {:f, 32}
+  def burn_to_nx(:f64), do: {:f, 64}
+  def burn_to_nx(:f16), do: {:f, 16}
+  def burn_to_nx(:bf16), do: {:bf, 16}
+  def burn_to_nx(:i32), do: {:s, 32}
+  def burn_to_nx(:i64), do: {:s, 64}
+  def burn_to_nx(:i16), do: {:s, 16}
+  def burn_to_nx(:i8), do: {:s, 8}
+  def burn_to_nx(:u8), do: {:u, 8}
+
+  # Legacy aliases kept so existing callers keep working. Prefer
+  # nx_to_burn/1 and burn_to_nx/1.
+  @doc false
+  def nx_type_to_burn(type), do: nx_to_burn(type)
+
+  @doc false
+  def burn_type_to_nx(type), do: burn_to_nx(type)
 
   # ── Nx ↔ Burn Conversion ─────────────────────────────────────────
 
@@ -69,7 +96,7 @@ defmodule ExBurn.Tensor do
   def from_nx(%Nx.Tensor{} = tensor) do
     data = Nx.to_binary(tensor)
     shape = Nx.shape(tensor) |> Tuple.to_list()
-    type = nx_type_to_burn(Nx.type(tensor))
+    type = nx_to_burn(Nx.type(tensor))
 
     try do
       ref = ExBurn.Nif.new_tensor(data, shape, Atom.to_string(type))
@@ -87,7 +114,7 @@ defmodule ExBurn.Tensor do
   """
   @spec to_nx(t()) :: {:ok, Nx.Tensor.t()} | {:error, String.t()}
   def to_nx(%__MODULE__{ref: ref, shape: shape, type: type}) do
-    nx_type = burn_type_to_nx(type)
+    nx_type = burn_to_nx(type)
 
     try do
       binary = ExBurn.Nif.tensor_to_binary(ref)

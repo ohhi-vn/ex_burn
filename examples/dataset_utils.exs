@@ -59,7 +59,7 @@ defmodule DatasetUtils do
     IO.puts("  Standard (z-score):")
 
     IO.puts(
-      "    Train mean (first feature): #{train_std |> Nx.slice([0, 0], [1, 1]) |> Nx.to_number() |> Float.round(4)}"
+      "    Train mean (first feature): #{train_std |> Nx.slice([0, 0], [1, 1]) |> Nx.squeeze() |> Nx.to_number() |> Float.round(4)}"
     )
 
     # Min-max normalization

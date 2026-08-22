@@ -3,9 +3,7 @@ defmodule ExBurn.ModelEdgeCaseTest do
 
   # Helper to build an Axon.ModelState from an Axon model graph.
   defp axon_model(axon_graph) do
-    {init_fn, _predict_fn} = Axon.build(axon_graph, [])
-    template = Nx.template({1, 1}, :f32)
-    init_fn.(template, Axon.ModelState.empty())
+    axon_graph
   end
 
   describe "compile/2 edge cases" do

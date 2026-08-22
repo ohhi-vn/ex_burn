@@ -37,6 +37,7 @@ defmodule ExBurn.Defn.Compiler do
   @behaviour Nx.Defn.Compiler
 
   alias Nx.Defn.{Composite, Expr, Tree}
+  alias ExBurn.Error
   alias ExBurn.NifHelper, as: Nif
 
   @creation_ops [:eye, :iota, :from_binary]
@@ -102,13 +103,38 @@ defmodule ExBurn.Defn.Compiler do
     {result, %{}}
   end
 
+  # Zips evaluated results with their output templates. Bare `%ExBurn.Backend{}`
+  # leaves are wrapped into the corresponding template tensor. We cannot use
+  # `Composite.traverse` on the raw result here because bare backend structs are
+  # not Nx tensors, so we walk composites ourselves.
   defp apply_output(result, output) do
-    {result, []} =
-      Composite.traverse(result, output, fn result, [out | acc] ->
-        {%{out | data: result.data}, acc}
+    {result, []} = zip_output(result, output)
+    result
+  end
+
+  defp zip_output(%ExBurn.Backend{} = data, [%Nx.Tensor{} = out | acc]) do
+    {%{out | data: data}, acc}
+  end
+
+  defp zip_output(tuple, output) when is_tuple(tuple) do
+    {list, acc} = tuple |> Tuple.to_list() |> Enum.map_reduce(output, &zip_output/2)
+    {List.to_tuple(list), acc}
+  end
+
+  defp zip_output(map, output) when is_map(map) and not is_struct(map) do
+    {pairs, acc} =
+      map
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.map_reduce(output, fn {key, value}, acc ->
+        {value, acc} = zip_output(value, acc)
+        {{key, value}, acc}
       end)
 
-    result
+    {Map.new(pairs), acc}
+  end
+
+  defp zip_output(other, [_out | acc]) do
+    {other, acc}
   end
 
   # ── Expression Evaluation ─────────────────────────────────────────
@@ -126,11 +152,8 @@ defmodule ExBurn.Defn.Compiler do
     eval(expr, state)
   end
 
-  defp eval(%Nx.Tensor{} = ans, state) do
-    burn_tensor = nx_tensor_to_burn(ans)
-    {burn_tensor, state}
-  end
-
+  # Generic expression nodes must be matched BEFORE the bare-tensor
+  # fallback below — %Nx.Tensor{} also matches Expr-backed tensors.
   defp eval(%Nx.Tensor{data: %Expr{id: id, op: op}} = ans, state) do
     state = maybe_gc(state)
 
@@ -139,12 +162,34 @@ defmodule ExBurn.Defn.Compiler do
         {cached, state}
 
       %{} ->
-        {args, state} = Tree.apply_args(ans, state, &eval/2)
-        {result, state} = eval_apply(op, args, ans, state)
+        {result, state} =
+          case op do
+            # Closure-bearing nodes must be dispatched with their RAW args —
+            # recursing into closure bodies would evaluate their internal
+            # parameters against the outer scope's params list.
+            op when op in [:fun, :while] ->
+              eval_apply(op, ans.data.args, ans, state)
+
+            _ ->
+              {args, state} = Tree.apply_args(ans, state, &eval/2)
+              eval_apply(op, args, ans, state)
+          end
+
         state = put_in(state.cache[id], result)
         {result, state}
     end
   end
+
+  defp eval(%Nx.Tensor{} = ans, state) do
+    burn_tensor = nx_tensor_to_burn(ans)
+    {burn_tensor, state}
+  end
+
+  # Already-evaluated leaves — bare backend structs from an earlier pass,
+  # plain numbers, or traced closures — pass through unchanged.
+  defp eval(%ExBurn.Backend{} = data, state), do: {data, state}
+
+  defp eval(other, state) when not is_struct(other, Nx.Tensor), do: {other, state}
 
   defp maybe_gc(%{gc: true} = state) do
     :erlang.garbage_collect(self())
@@ -160,6 +205,10 @@ defmodule ExBurn.Defn.Compiler do
       %Nx.Tensor{data: %Nx.Defn.Expr{}} = tensor ->
         raise ArgumentError,
               "cannot pass a tensor expression as argument to defn, got: #{inspect(tensor)}"
+
+      # Already-evaluated loop-carried values pass straight through
+      %ExBurn.Backend{} = data ->
+        {data, state}
 
       %Nx.Tensor{} = tensor ->
         burn_tensor = nx_tensor_to_burn(tensor)
@@ -177,36 +226,56 @@ defmodule ExBurn.Defn.Compiler do
     eval(expr, state)
   end
 
-  defp eval_apply(:fun, [length, expr, _mfa], _ans, state) do
-    fun =
-      case length do
-        1 ->
-          fn arg1 ->
-            params = [fn -> Nx.to_tensor(arg1) end]
-            {result, _} = run_eval([], fn _ -> expr end, params, [])
-            result
-          end
+  defp eval_apply(:cond, [clauses, last], _ans, state) when is_list(clauses) do
+    # nx >= 0.13 hands us already-evaluated {pred, body} pairs plus the
+    # final fallback value — pick the first branch whose pred is truthy.
+    chosen =
+      Enum.find_value(clauses, fn {pred, body} ->
+        if burn_to_number(pred) != 0, do: body
+      end) || last
 
-        2 ->
-          fn arg1, arg2 ->
-            params = [fn -> Nx.to_tensor(arg1) end, fn -> Nx.to_tensor(arg2) end]
-            {result, _} = run_eval([], fn _ -> expr end, params, [])
-            result
-          end
-      end
-
-    {fun, state}
-  end
-
-  defp eval_apply(:cond, [clauses_cache, last_cache, _parent_ids], _ans, state) do
-    {chosen, state} = cond_clause(clauses_cache, last_cache, state)
     composite_eval(chosen, state)
   end
 
-  defp eval_apply(:while, [initial, pred, block, _while_cache], _ans, state) do
-    {initial, state} = composite_eval(initial, state)
-    {result, state} = while_loop(initial, pred, block, state)
+  defp eval_apply(:while, [initial, arg, condition, body], _ans, state) do
+    # nx >= 0.13 node layout: [flatten_initial, flatten_arg, condition, body].
+    # The loop variable arrives as a parameter expression whose *global*
+    # index must be honoured when binding per-iteration params.
+    loop_idx =
+      case arg do
+        %Nx.Tensor{data: %Nx.Defn.Expr{op: :parameter, args: [i]}} -> i
+        _ -> 0
+      end
+
+    {initial_val, state} = composite_eval(initial, state)
+    {result, state} = while_loop(initial_val, condition, body, state, loop_idx)
     {result, state}
+  end
+
+  defp eval_apply(:hook, [expr, callback_spec, _user_template, _ref], _ans, state) do
+    # nx >= 0.13 node layout: [tensor_expr, callback_spec, template, ref].
+    # The traced spec carries only the hook name — resolve the runtime
+    # callback from state.hooks.
+    {value, state} = composite_eval(expr, state)
+
+    case callback_spec do
+      {:named, name, nil} when is_atom(name) ->
+        case Map.get(state.hooks, name) do
+          fun when is_function(fun, 1) -> fun.(to_hook_value(value))
+          _ -> :ok
+        end
+
+      {:named, _name, fun} when is_function(fun, 1) ->
+        fun.(to_hook_value(value))
+
+      fun when is_function(fun, 1) ->
+        fun.(to_hook_value(value))
+
+      _ ->
+        :ok
+    end
+
+    {value, state}
   end
 
   defp eval_apply(:token, [exprs_hooks], _ans, state) do
@@ -242,10 +311,90 @@ defmodule ExBurn.Defn.Compiler do
     end
   end
 
+  defp eval_apply(:fun, [param_exprs, expr, _mfa], _ans, state) do
+    # nx >= 0.13 node layout: [param_exprs, body_expr, mfa]. Closure
+    # parameters carry *global* indices — pad the local thunk list so
+    # Enum.fetch!/2 inside :parameter lands on the right thunk.
+    params_list = List.wrap(param_exprs)
+    arity = length(params_list)
+
+    offset =
+      case params_list do
+        [%Nx.Tensor{data: %Nx.Defn.Expr{op: :parameter, args: [i]}} | _] -> i
+        _ -> 0
+      end
+
+    fun =
+      case arity do
+        1 ->
+          fn arg1 ->
+            thunks = [fn -> to_eval_input(arg1) end]
+            {result, _} = run_eval([], fn _ -> expr end, pad_params(offset, thunks), [])
+            to_plain_tensor(result)
+          end
+
+        2 ->
+          fn arg1, arg2 ->
+            thunks = [fn -> to_eval_input(arg1) end, fn -> to_eval_input(arg2) end]
+
+            {result, _} = run_eval([], fn _ -> expr end, pad_params(offset, thunks), [])
+            to_plain_tensor(result)
+          end
+
+        other ->
+          raise "closures with arity #{other} are not supported by ExBurn.Defn.Compiler"
+      end
+
+    {fun, state}
+  end
+
+  # Host-side callbacks (e.g. Nx.reduce on BinaryBackend) must stay in
+  # plain-tensor land — convert evaluator outputs back before returning.
+  # Note: our backend_transfer is an identity op, so the round-trip has to
+  # go through the stored bytes.
   defp eval_apply(op, args, ans, state) do
-    {args, state} = prepare_op_args(ans, args, state)
     {result, state} = execute_op(op, args, ans, state)
     {result, state}
+  end
+
+  defp to_plain_tensor(%Nx.Tensor{data: %ExBurn.Backend{}} = t) do
+    t
+    |> Nx.to_binary()
+    |> Nx.from_binary(t.type)
+    |> Nx.reshape(Nx.shape(t))
+  end
+
+  defp to_plain_tensor(%Nx.Tensor{} = t), do: t
+
+  defp to_plain_tensor(%ExBurn.Backend{shape: shape, type: type} = data) do
+    wrapped = %Nx.Tensor{
+      data: data,
+      type: ExBurn.Tensor.burn_to_nx(type),
+      shape: List.to_tuple(shape),
+      names: List.duplicate(nil, length(shape))
+    }
+
+    Nx.backend_transfer(wrapped, Nx.BinaryBackend)
+  end
+
+  defp to_plain_tensor(other), do: other
+
+  defp to_eval_input(%Nx.Tensor{} = t), do: t
+  defp to_eval_input(%ExBurn.Backend{} = data), do: data
+  defp to_eval_input(other), do: Nx.to_tensor(other)
+
+  defp pad_params(0, thunks), do: thunks
+  defp pad_params(n, thunks) when n > 0, do: List.duplicate(fn -> Nx.tensor(0.0) end, n) ++ thunks
+
+  defp to_hook_value(%Nx.Tensor{} = t), do: t
+
+  defp to_hook_value(%ExBurn.Backend{shape: shape, type: type} = data) do
+    %Nx.Tensor{
+      data: data,
+      type: ExBurn.Tensor.burn_to_nx(type),
+      shape: List.to_tuple(shape),
+      names: List.duplicate(nil, length(shape))
+    }
   end
 
   # ── Block Args ────────────────────────────────────────────────────
@@ -266,10 +415,6 @@ defmodule ExBurn.Defn.Compiler do
   end
 
   # ── Op Argument Preparation ───────────────────────────────────────
-
-  defp prepare_op_args(ans, args, state) do
-    Tree.apply_args(put_in(ans.data.args, args), state, &eval/2)
-  end
 
   # ── Op Execution ──────────────────────────────────────────────────
 
@@ -292,36 +437,44 @@ defmodule ExBurn.Defn.Compiler do
           {ExBurn.Backend, [ans | args]}
       end
 
-    result = apply(mod, op, call_args)
+    # Backend callbacks written for Nx dispatch expect %Nx.Tensor{} operands;
+    # the evaluator produces bare %ExBurn.Backend{} structs — wrap them.
+    result = apply(mod, op, normalize_backend_args(call_args))
     {result, state}
+  end
+
+  defp normalize_backend_args(args) do
+    Enum.map(args, fn
+      %ExBurn.Backend{} = data -> wrap_bare_arg(data)
+      other -> other
+    end)
+  end
+
+  defp wrap_bare_arg(%ExBurn.Backend{shape: shape, type: type} = data) do
+    %Nx.Tensor{
+      data: data,
+      type: ExBurn.Tensor.burn_to_nx(type),
+      shape: List.to_tuple(shape),
+      names: List.duplicate(nil, length(shape))
+    }
   end
 
   # ── Control Flow ──────────────────────────────────────────────────
 
-  defp while_loop(acc, condition, block, state) do
-    state = %{state | params: composite_to_params(acc)}
+  defp while_loop(acc, condition, block, state, idx) do
+    # Fresh cache every iteration — cached subexpression results belong to
+    # the previous accumulator and would otherwise freeze the loop.
+    thunks = composite_to_params(acc)
+    params = List.duplicate(fn -> Nx.tensor(0.0) end, idx) ++ thunks
+    state = %{state | params: params, cache: %{}}
     {pred, state} = eval(condition, state)
 
     if burn_to_number(pred) != 0 do
       {acc, state} = composite_eval(block, state)
-      while_loop(acc, condition, block, state)
+      while_loop(acc, condition, block, state, idx)
     else
       {acc, state}
     end
-  end
-
-  defp cond_clause([{{pred, body}, cache} | clauses], last_cache, state) do
-    {pred, state} = eval(pred, %{state | cache: cache})
-
-    if burn_to_number(pred) != 0 do
-      {body, state}
-    else
-      cond_clause(clauses, last_cache, state)
-    end
-  end
-
-  defp cond_clause([], {last, last_cache}, state) do
-    {last, %{state | cache: last_cache}}
   end
 
   # ── Composite Evaluation ──────────────────────────────────────────
@@ -347,22 +500,32 @@ defmodule ExBurn.Defn.Compiler do
   defp constant_to_burn(ans, constant) do
     shape = Tuple.to_list(Nx.shape(ans))
     type = nx_type_to_burn_type(Nx.type(ans))
-    data = <<constant::float-32-native>>
+
+    # Replicate the scalar to fill the shape — the Rust side validates
+    # byte size against the declared shape.
+    data =
+      <<constant * 1.0::float-32-native>>
+      |> :binary.copy(max(Enum.product(shape), 1))
 
     case Nif.new_tensor(data, shape, Atom.to_string(type)) do
       {:ok, ref} -> %ExBurn.Backend{ref: ref, shape: shape, type: type}
-      {:error, _} -> %ExBurn.Backend{ref: make_ref(), shape: shape, type: type}
+      {:error, reason} -> raise Error, op: :constant, reason: reason
     end
   end
 
   defp nx_tensor_to_burn(%Nx.Tensor{} = tensor) do
-    data = Nx.to_binary(tensor)
     shape = Tuple.to_list(Nx.shape(tensor))
     type = nx_type_to_burn_type(Nx.type(tensor))
 
+    # Cast to f32 (value-preserving) since the NIF stores f32 only.
+    data =
+      tensor
+      |> Nx.as_type({:f, 32})
+      |> Nx.to_binary()
+
     case Nif.new_tensor(data, shape, Atom.to_string(type)) do
       {:ok, ref} -> %ExBurn.Backend{ref: ref, shape: shape, type: type}
-      {:error, _} -> %ExBurn.Backend{ref: make_ref(), shape: shape, type: type}
+      {:error, reason} -> raise Error, op: :parameter, reason: reason
     end
   end
 
@@ -375,14 +538,6 @@ defmodule ExBurn.Defn.Compiler do
 
   defp burn_to_number(val) when is_number(val), do: val
 
-  defp nx_type_to_burn_type({:f, 32}), do: :f32
-  defp nx_type_to_burn_type({:f, 64}), do: :f64
-  defp nx_type_to_burn_type({:f, 16}), do: :f16
-  defp nx_type_to_burn_type({:bf, 16}), do: :bf16
-  defp nx_type_to_burn_type({:s, 32}), do: :i32
-  defp nx_type_to_burn_type({:s, 64}), do: :i64
-  defp nx_type_to_burn_type({:s, 16}), do: :i16
-  defp nx_type_to_burn_type({:s, 8}), do: :i8
-  defp nx_type_to_burn_type({:u, 8}), do: :u8
-  defp nx_type_to_burn_type(_), do: :f32
+  # Delegates to the canonical mapping in ExBurn.Tensor.
+  defp nx_type_to_burn_type(type), do: ExBurn.Tensor.nx_to_burn(type)
 end

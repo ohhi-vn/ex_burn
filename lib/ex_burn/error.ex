@@ -48,7 +48,7 @@ defmodule ExBurn.Error do
 
   ## Examples
 
-      iex> ExBurn.Error.new(op: :add, reason: %{"bad input"})
+      iex> ExBurn.Error.new(op: :add, reason: "bad input")
       %ExBurn.Error{op: :add, reason: "bad input", details: nil}
   """
   @spec new(keyword()) :: t()

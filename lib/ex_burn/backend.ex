@@ -39,6 +39,30 @@ defmodule ExBurn.Backend do
 
   @behaviour Nx.Backend
 
+  # The callbacks intentionally pattern-match on the *data* struct
+  # (%__MODULE__{}) rather than the full %Nx.Tensor{}, and return the data
+  # struct directly — Nx wraps it into a tensor at runtime. This diverges
+  # from the behaviour's nominal %Nx.Tensor{} specs, which Dialyzer flags
+  # for every callback. Suppress at module level with this rationale;
+  # revisit if the backend is ever reworked to build full tensors.
+  @dialyzer {:nowarn_function,
+             window_sum: 4,
+             window_max: 4,
+             window_min: 4,
+             window_product: 4,
+             window_reduce: 6,
+             window_scatter_max: 6,
+             window_scatter_min: 6,
+             indexed_add: 5,
+             indexed_put: 5,
+             put_slice: 4,
+             fft: 3,
+             ifft: 3,
+             sort: 3,
+             argsort: 3,
+             triangular_solve: 4,
+             to_batched: 3}
+
   alias ExBurn.Tensor, as: BT
   alias ExBurn.Error
   alias ExBurn.NifHelper, as: Nif
@@ -51,7 +75,41 @@ defmodule ExBurn.Backend do
 
   defstruct [:ref, :shape, :type]
 
+  alias Nx.Tensor, as: T
+
   @dialyzer {:nowarn_function, block: 4}
+
+  # Wraps a backend struct into an Nx.Tensor, per the Nx.Backend contract.
+  defp wrap(out, %__MODULE__{} = data) do
+    names =
+      case out do
+        %T{names: names} when is_list(names) -> names
+        _ -> List.duplicate(nil, length(data.shape))
+      end
+
+    data = harmonize_shape(out, data)
+
+    %T{
+      data: data,
+      shape: List.to_tuple(data.shape),
+      type: burn_to_nx_type(data.type),
+      names: names
+    }
+  end
+
+  # The Rust layer materializes scalar results as rank-1 tensors; align the
+  # stored shape with the declared output shape when element counts match.
+  defp harmonize_shape(%T{} = out, %__MODULE__{shape: shape} = data) do
+    declared = out |> Nx.shape() |> Tuple.to_list()
+
+    if declared != shape and Enum.product(declared) == Enum.product(shape) do
+      %{data | shape: declared}
+    else
+      data
+    end
+  end
+
+  defp harmonize_shape(_out, data), do: data
 
   # ── Allocation ───────────────────────────────────────────────────
 
@@ -62,13 +120,17 @@ defmodule ExBurn.Backend do
   @impl true
   @spec constant(Nx.Tensor.t(), number(), keyword()) :: t()
   def constant(out, value, _opts) do
-    type = nx_to_burn_type(Nx.type(out))
+    # The NIF layer only supports f32 storage; always encode as f32.
+    type = :f32
     shape = Tuple.to_list(Nx.shape(out))
-    data = <<value::float-32-native>>
+
+    # The Rust side validates byte size against the declared shape, so the
+    # scalar value must be replicated to fill every element.
+    data = :binary.copy(<<value * 1.0::float-32-native>>, Enum.product(shape))
 
     case Nif.new_tensor(data, shape, Atom.to_string(type)) do
       {:ok, ref} ->
-        %__MODULE__{ref: ref, shape: shape, type: type}
+        wrap(out, %__MODULE__{ref: ref, shape: shape, type: type})
 
       {:error, reason} ->
         raise Error, op: :constant, reason: reason
@@ -81,18 +143,31 @@ defmodule ExBurn.Backend do
     burn_type = nx_to_burn_type(nx_type)
     shape = Tuple.to_list(Nx.shape(out))
 
-    case Nif.new_tensor(binary, shape, Atom.to_string(burn_type)) do
+    # The NIF stores f32 only: re-encode through Nx so the dtype
+    # conversion is value-preserving instead of a byte reinterpretation.
+    data = encode_as_f32(binary, nx_type)
+
+    case Nif.new_tensor(data, shape, Atom.to_string(burn_type)) do
       {:ok, ref} ->
-        %__MODULE__{ref: ref, shape: shape, type: burn_type}
+        wrap(out, %__MODULE__{ref: ref, shape: shape, type: burn_type})
 
       {:error, reason} ->
         raise Error, op: :from_binary, reason: reason
     end
   end
 
+  defp encode_as_f32(binary, {:f, 32}), do: binary
+
+  defp encode_as_f32(binary, nx_type) do
+    binary
+    |> Nx.from_binary(nx_type)
+    |> Nx.as_type({:f, 32})
+    |> Nx.to_binary()
+  end
+
   @impl true
   @spec to_binary(t(), non_neg_integer()) :: binary()
-  def to_binary(%__MODULE__{ref: ref}, _limit) do
+  def to_binary(%T{data: %__MODULE__{ref: ref}}, _limit) do
     case Nif.tensor_to_binary(ref) do
       {:ok, binary} ->
         binary
@@ -117,907 +192,313 @@ defmodule ExBurn.Backend do
 
   # ── Element-wise Arithmetic ──────────────────────────────────────
 
-  @impl true
-  @spec add(Nx.Tensor.t(), t(), t()) :: t()
-  def add(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    out_type = result_type(a.type, b.type)
-    a = maybe_cast(a, out_type)
-    b = maybe_cast(b, out_type)
+  # Binary ops dispatched to the NIF with type promotion.
+  @binary_nif_ops [
+    add: :add_tensor,
+    subtract: :sub_tensor,
+    multiply: :mul_tensor,
+    divide: :div_tensor,
+    pow: :pow_tensor
+  ]
 
-    with {:ok, ref} <- Nif.add_tensor(a.ref, b.ref),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: out_type}
-    else
-      {:error, reason} -> raise Error, op: :add, reason: reason
+  for {nx_op, nif} <- @binary_nif_ops do
+    @impl true
+    def unquote(nx_op)(out, %T{data: %__MODULE__{} = a}, %T{data: %__MODULE__{} = b}) do
+      out_type = result_type(a.type, b.type)
+      a = maybe_cast(a, out_type)
+      b = maybe_cast(b, out_type)
+
+      with {:ok, ref} <- Nif.unquote(nif)(a.ref, b.ref),
+           {:ok, shape} <- Nif.tensor_shape(ref) do
+        wrap(out, %__MODULE__{ref: ref, shape: shape, type: out_type})
+      else
+        {:error, reason} -> raise Error, op: unquote(nx_op), reason: reason
+      end
+    end
+
+    # Fallback: one side may be a scalar/constant on the default backend.
+    # Convert both sides to this backend, then dispatch to the NIF path.
+    @impl true
+    def unquote(nx_op)(out, %T{} = a, %T{} = b) do
+      a = Nx.backend_transfer(a, __MODULE__)
+      b = Nx.backend_transfer(b, __MODULE__)
+      unquote(nx_op)(out, a, b)
     end
   end
 
-  @impl true
-  @spec subtract(Nx.Tensor.t(), t(), t()) :: t()
-  def subtract(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    out_type = result_type(a.type, b.type)
-    a = maybe_cast(a, out_type)
-    b = maybe_cast(b, out_type)
+  # Unary ops dispatched to the NIF (always f32).
+  @unary_nif_ops [
+    negate: :neg_tensor,
+    abs: :abs_tensor,
+    exp: :exp_tensor,
+    log: :log_tensor,
+    sqrt: :sqrt_tensor,
+    sigmoid: :sigmoid_tensor,
+    tanh: :tanh_tensor
+  ]
 
-    with {:ok, ref} <- Nif.sub_tensor(a.ref, b.ref),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: out_type}
-    else
-      {:error, reason} -> raise Error, op: :subtract, reason: reason
+  for {nx_op, nif} <- @unary_nif_ops do
+    @impl true
+    def unquote(nx_op)(out, %T{data: %__MODULE__{} = a}) do
+      a = maybe_cast(a, :f32)
+
+      with {:ok, ref} <- Nif.unquote(nif)(a.ref),
+           {:ok, shape} <- Nif.tensor_shape(ref) do
+        wrap(out, %__MODULE__{ref: ref, shape: shape, type: :f32})
+      else
+        {:error, reason} -> raise Error, op: unquote(nx_op), reason: reason
+      end
     end
-  end
 
-  @impl true
-  @spec multiply(Nx.Tensor.t(), t(), t()) :: t()
-  def multiply(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    out_type = result_type(a.type, b.type)
-    a = maybe_cast(a, out_type)
-    b = maybe_cast(b, out_type)
-
-    with {:ok, ref} <- Nif.mul_tensor(a.ref, b.ref),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: out_type}
-    else
-      {:error, reason} -> raise Error, op: :multiply, reason: reason
-    end
-  end
-
-  @impl true
-  @spec divide(Nx.Tensor.t(), t(), t()) :: t()
-  def divide(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    out_type = result_type(a.type, b.type)
-    a = maybe_cast(a, out_type)
-    b = maybe_cast(b, out_type)
-
-    with {:ok, ref} <- Nif.div_tensor(a.ref, b.ref),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: out_type}
-    else
-      {:error, reason} -> raise Error, op: :divide, reason: reason
-    end
-  end
-
-  @impl true
-  @spec negate(Nx.Tensor.t(), t()) :: t()
-  def negate(_out, %__MODULE__{} = a) do
-    a = maybe_cast(a, :f32)
-
-    with {:ok, ref} <- Nif.neg_tensor(a.ref),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
-    else
-      {:error, reason} -> raise Error, op: :negate, reason: reason
-    end
-  end
-
-  @impl true
-  @spec abs(Nx.Tensor.t(), t()) :: t()
-  def abs(_out, %__MODULE__{} = a) do
-    a = maybe_cast(a, :f32)
-
-    with {:ok, ref} <- Nif.abs_tensor(a.ref),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
-    else
-      {:error, reason} -> raise Error, op: :abs, reason: reason
-    end
-  end
-
-  @impl true
-  @spec exp(Nx.Tensor.t(), t()) :: t()
-  def exp(_out, %__MODULE__{} = a) do
-    a = maybe_cast(a, :f32)
-
-    with {:ok, ref} <- Nif.exp_tensor(a.ref),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
-    else
-      {:error, reason} -> raise Error, op: :exp, reason: reason
-    end
-  end
-
-  @impl true
-  @spec log(Nx.Tensor.t(), t()) :: t()
-  def log(_out, %__MODULE__{} = a) do
-    a = maybe_cast(a, :f32)
-
-    with {:ok, ref} <- Nif.log_tensor(a.ref),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
-    else
-      {:error, reason} -> raise Error, op: :log, reason: reason
-    end
-  end
-
-  @impl true
-  @spec sqrt(Nx.Tensor.t(), t()) :: t()
-  def sqrt(_out, %__MODULE__{} = a) do
-    a = maybe_cast(a, :f32)
-
-    with {:ok, ref} <- Nif.sqrt_tensor(a.ref),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
-    else
-      {:error, reason} -> raise Error, op: :sqrt, reason: reason
-    end
-  end
-
-  @impl true
-  @spec sigmoid(Nx.Tensor.t(), t()) :: t()
-  def sigmoid(_out, %__MODULE__{} = a) do
-    a = maybe_cast(a, :f32)
-
-    with {:ok, ref} <- Nif.sigmoid_tensor(a.ref),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
-    else
-      {:error, reason} -> raise Error, op: :sigmoid, reason: reason
-    end
-  end
-
-  @impl true
-  @spec tanh(Nx.Tensor.t(), t()) :: t()
-  def tanh(_out, %__MODULE__{} = a) do
-    a = maybe_cast(a, :f32)
-
-    with {:ok, ref} <- Nif.tanh_tensor(a.ref),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
-    else
-      {:error, reason} -> raise Error, op: :tanh, reason: reason
-    end
-  end
-
-  @impl true
-  @spec pow(Nx.Tensor.t(), t(), t()) :: t()
-  def pow(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    out_type = result_type(a.type, b.type)
-    a = maybe_cast(a, out_type)
-    b = maybe_cast(b, out_type)
-
-    with {:ok, ref} <- Nif.pow_tensor(a.ref, b.ref),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: out_type}
-    else
-      {:error, reason} -> raise Error, op: :pow, reason: reason
+    @impl true
+    def unquote(nx_op)(out, %T{} = a) do
+      a = Nx.backend_transfer(a, __MODULE__)
+      unquote(nx_op)(out, a)
     end
   end
 
   @impl true
   @spec remainder(Nx.Tensor.t(), t(), t()) :: t()
-  def remainder(out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    # remainder(a, b) = a - trunc(a/b) * b
-    div_result = divide(out, a, b)
-    truncated = truncate_tensor(div_result)
-    mul_result = multiply(out, truncated, b)
-    subtract(out, a, mul_result)
+  def remainder(_out, %T{data: %__MODULE__{} = a}, %T{data: %__MODULE__{} = b}) do
+    # Truncated remainder: r = a - trunc(a / b) * b
+    nx_fallback(:remainder, fn ->
+      nx_a = to_nx!(a)
+      nx_b = to_nx!(b)
+
+      ratio = Nx.divide(nx_a, nx_b)
+
+      truncated =
+        Nx.select(Nx.greater(ratio, 0.0), Nx.floor(ratio), Nx.ceil(ratio))
+
+      Nx.subtract(nx_a, Nx.multiply(truncated, nx_b))
+    end)
   end
 
-  # Helper to truncate a tensor (floor for positive, ceil for negative)
-  # Fallback implementation using Nx since NIF doesn't have truncate_tensor
-  defp truncate_tensor(%__MODULE__{} = tensor) do
-    with {:ok, nx_tensor} <- to_nx(tensor),
-         result = Nx.floor(nx_tensor),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, _} -> tensor
+  # Ops computed via Nx round-trip (no direct NIF support yet).
+  # Each entry: {callback name, arity, Nx function, error op tag}.
+  @nx_binary_ops [
+    atan2: :atan2,
+    min: :min,
+    max: :max,
+    bitwise_and: :bitwise_and,
+    bitwise_or: :bitwise_or,
+    bitwise_xor: :bitwise_xor,
+    left_shift: :left_shift,
+    right_shift: :right_shift,
+    equal: :equal,
+    not_equal: :not_equal,
+    greater: :greater,
+    less: :less,
+    greater_equal: :greater_equal,
+    less_equal: :less_equal,
+    logical_and: :logical_and,
+    logical_or: :logical_or,
+    logical_xor: :logical_xor
+  ]
+
+  for {nx_op, err_op} <- @nx_binary_ops do
+    @impl true
+    def unquote(nx_op)(out, %T{data: %__MODULE__{} = a}, %T{data: %__MODULE__{} = b}) do
+      unquote(nx_op)(out, a, b)
+    end
+
+    @impl true
+    def unquote(nx_op)(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
+      with {:ok, nx_a} <- to_nx(a),
+           {:ok, nx_b} <- to_nx(b),
+           result = Nx.unquote(nx_op)(nx_a, nx_b),
+           {:ok, bt} <- from_nx(result) do
+        bt
+      else
+        {:error, reason} -> raise Error, op: unquote(err_op), reason: reason
+      end
     end
   end
 
-  @impl true
-  @spec atan2(Nx.Tensor.t(), t(), t()) :: t()
-  def atan2(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    # Approximate atan2 using Nx operations
-    with {:ok, nx_a} <- to_nx(a),
-         {:ok, nx_b} <- to_nx(b),
-         result = Nx.atan2(nx_a, nx_b),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :atan2, reason: reason
-    end
-  end
+  @nx_unary_ops [
+    acos: :acos,
+    acosh: :acosh,
+    asin: :asin,
+    asinh: :asinh,
+    atan: :atan,
+    atanh: :atanh,
+    cbrt: :cbrt,
+    ceil: :ceil,
+    conjugate: :conjugate,
+    cos: :cos,
+    cosh: :cosh,
+    erf: :erf,
+    erfc: :erfc,
+    erf_inv: :erf_inv,
+    expm1: :expm1,
+    floor: :floor,
+    log1p: :log1p,
+    rsqrt: :rsqrt,
+    sin: :sin,
+    sinh: :sinh,
+    tan: :tan,
+    bitwise_not: :bitwise_not,
+    round: :round,
+    sign: :sign,
+    count_leading_zeros: :count_leading_zeros,
+    population_count: :population_count,
+    real: :real,
+    imag: :imag,
+    is_nan: :is_nan,
+    is_infinity: :is_infinity
+  ]
 
-  @impl true
-  @spec min(Nx.Tensor.t(), t(), t()) :: t()
-  def min(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    # Element-wise min using Nx: min(a, b) = -max(-a, -b)
-    with {:ok, nx_a} <- to_nx(a),
-         {:ok, nx_b} <- to_nx(b),
-         result = Nx.min(nx_a, nx_b),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :min, reason: reason
+  for {nx_op, err_op} <- @nx_unary_ops do
+    @impl true
+    def unquote(nx_op)(out, %T{data: %__MODULE__{} = a}) do
+      unquote(nx_op)(out, a)
     end
-  end
 
-  @impl true
-  @spec max(Nx.Tensor.t(), t(), t()) :: t()
-  def max(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    # Element-wise max using Nx
-    with {:ok, nx_a} <- to_nx(a),
-         {:ok, nx_b} <- to_nx(b),
-         result = Nx.max(nx_a, nx_b),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :max, reason: reason
+    @impl true
+    def unquote(nx_op)(_out, %__MODULE__{} = a) do
+      with {:ok, nx_a} <- to_nx(a),
+           result = Nx.unquote(nx_op)(nx_a),
+           {:ok, bt} <- from_nx(result) do
+        bt
+      else
+        {:error, reason} -> raise Error, op: unquote(err_op), reason: reason
+      end
     end
   end
 
   @impl true
   @spec quotient(Nx.Tensor.t(), t(), t()) :: t()
-  def quotient(out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    divide(out, a, b)
-  end
-
-  @impl true
-  @spec bitwise_and(Nx.Tensor.t(), t(), t()) :: t()
-  def bitwise_and(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    with {:ok, nx_a} <- to_nx(a),
-         {:ok, nx_b} <- to_nx(b),
-         result = Nx.bitwise_and(nx_a, nx_b),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :bitwise_and, reason: reason
-    end
-  end
-
-  @impl true
-  @spec bitwise_or(Nx.Tensor.t(), t(), t()) :: t()
-  def bitwise_or(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    with {:ok, nx_a} <- to_nx(a),
-         {:ok, nx_b} <- to_nx(b),
-         result = Nx.bitwise_or(nx_a, nx_b),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :bitwise_or, reason: reason
-    end
-  end
-
-  @impl true
-  @spec bitwise_xor(Nx.Tensor.t(), t(), t()) :: t()
-  def bitwise_xor(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    with {:ok, nx_a} <- to_nx(a),
-         {:ok, nx_b} <- to_nx(b),
-         result = Nx.bitwise_xor(nx_a, nx_b),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :bitwise_xor, reason: reason
-    end
-  end
-
-  @impl true
-  @spec left_shift(Nx.Tensor.t(), t(), t()) :: t()
-  def left_shift(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    with {:ok, nx_a} <- to_nx(a),
-         {:ok, nx_b} <- to_nx(b),
-         result = Nx.left_shift(nx_a, nx_b),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :left_shift, reason: reason
-    end
-  end
-
-  @impl true
-  @spec right_shift(Nx.Tensor.t(), t(), t()) :: t()
-  def right_shift(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    with {:ok, nx_a} <- to_nx(a),
-         {:ok, nx_b} <- to_nx(b),
-         result = Nx.right_shift(nx_a, nx_b),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :right_shift, reason: reason
-    end
-  end
-
-  # ── Comparison ───────────────────────────────────────────────────
-
-  @impl true
-  @spec equal(Nx.Tensor.t(), t(), t()) :: t()
-  def equal(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    with {:ok, nx_a} <- to_nx(a),
-         {:ok, nx_b} <- to_nx(b),
-         result = Nx.equal(nx_a, nx_b),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :equal, reason: reason
-    end
-  end
-
-  @impl true
-  @spec not_equal(Nx.Tensor.t(), t(), t()) :: t()
-  def not_equal(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    with {:ok, nx_a} <- to_nx(a),
-         {:ok, nx_b} <- to_nx(b),
-         result = Nx.not_equal(nx_a, nx_b),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :not_equal, reason: reason
-    end
-  end
-
-  @impl true
-  @spec greater(Nx.Tensor.t(), t(), t()) :: t()
-  def greater(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    with {:ok, nx_a} <- to_nx(a),
-         {:ok, nx_b} <- to_nx(b),
-         result = Nx.greater(nx_a, nx_b),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :greater, reason: reason
-    end
-  end
-
-  @impl true
-  @spec less(Nx.Tensor.t(), t(), t()) :: t()
-  def less(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    with {:ok, nx_a} <- to_nx(a),
-         {:ok, nx_b} <- to_nx(b),
-         result = Nx.less(nx_a, nx_b),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :less, reason: reason
-    end
-  end
-
-  @impl true
-  @spec greater_equal(Nx.Tensor.t(), t(), t()) :: t()
-  def greater_equal(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    with {:ok, nx_a} <- to_nx(a),
-         {:ok, nx_b} <- to_nx(b),
-         result = Nx.greater_equal(nx_a, nx_b),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :greater_equal, reason: reason
-    end
-  end
-
-  @impl true
-  @spec less_equal(Nx.Tensor.t(), t(), t()) :: t()
-  def less_equal(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    with {:ok, nx_a} <- to_nx(a),
-         {:ok, nx_b} <- to_nx(b),
-         result = Nx.less_equal(nx_a, nx_b),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :less_equal, reason: reason
-    end
-  end
-
-  @impl true
-  @spec logical_and(Nx.Tensor.t(), t(), t()) :: t()
-  def logical_and(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    with {:ok, nx_a} <- to_nx(a),
-         {:ok, nx_b} <- to_nx(b),
-         result = Nx.logical_and(nx_a, nx_b),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :logical_and, reason: reason
-    end
-  end
-
-  @impl true
-  @spec logical_or(Nx.Tensor.t(), t(), t()) :: t()
-  def logical_or(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    with {:ok, nx_a} <- to_nx(a),
-         {:ok, nx_b} <- to_nx(b),
-         result = Nx.logical_or(nx_a, nx_b),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :logical_or, reason: reason
-    end
-  end
-
-  @impl true
-  @spec logical_xor(Nx.Tensor.t(), t(), t()) :: t()
-  def logical_xor(_out, %__MODULE__{} = a, %__MODULE__{} = b) do
-    with {:ok, nx_a} <- to_nx(a),
-         {:ok, nx_b} <- to_nx(b),
-         result = Nx.logical_xor(nx_a, nx_b),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :logical_xor, reason: reason
-    end
-  end
-
-  # ── Unary Math Functions ─────────────────────────────────────────
-
-  @impl true
-  @spec acos(Nx.Tensor.t(), t()) :: t()
-  def acos(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.acos(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :acos, reason: reason
-    end
-  end
-
-  @impl true
-  @spec acosh(Nx.Tensor.t(), t()) :: t()
-  def acosh(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.acosh(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :acosh, reason: reason
-    end
-  end
-
-  @impl true
-  @spec asin(Nx.Tensor.t(), t()) :: t()
-  def asin(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.asin(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :asin, reason: reason
-    end
-  end
-
-  @impl true
-  @spec asinh(Nx.Tensor.t(), t()) :: t()
-  def asinh(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.asinh(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :asinh, reason: reason
-    end
-  end
-
-  @impl true
-  @spec atan(Nx.Tensor.t(), t()) :: t()
-  def atan(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.atan(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :atan, reason: reason
-    end
-  end
-
-  @impl true
-  @spec atanh(Nx.Tensor.t(), t()) :: t()
-  def atanh(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.atanh(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :atanh, reason: reason
-    end
-  end
-
-  @impl true
-  @spec cbrt(Nx.Tensor.t(), t()) :: t()
-  def cbrt(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.cbrt(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :cbrt, reason: reason
-    end
-  end
-
-  @impl true
-  @spec ceil(Nx.Tensor.t(), t()) :: t()
-  def ceil(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.ceil(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :ceil, reason: reason
-    end
-  end
-
-  @impl true
-  @spec conjugate(Nx.Tensor.t(), t()) :: t()
-  def conjugate(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.conjugate(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :conjugate, reason: reason
-    end
-  end
-
-  @impl true
-  @spec cos(Nx.Tensor.t(), t()) :: t()
-  def cos(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.cos(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :cos, reason: reason
-    end
-  end
-
-  @impl true
-  @spec cosh(Nx.Tensor.t(), t()) :: t()
-  def cosh(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.cosh(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :cosh, reason: reason
-    end
-  end
-
-  @impl true
-  @spec erf(Nx.Tensor.t(), t()) :: t()
-  def erf(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.erf(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :erf, reason: reason
-    end
-  end
-
-  @impl true
-  @spec erfc(Nx.Tensor.t(), t()) :: t()
-  def erfc(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.erfc(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :erfc, reason: reason
-    end
-  end
-
-  @impl true
-  @spec erf_inv(Nx.Tensor.t(), t()) :: t()
-  def erf_inv(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.erf_inv(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :erf_inv, reason: reason
-    end
-  end
-
-  @impl true
-  @spec expm1(Nx.Tensor.t(), t()) :: t()
-  def expm1(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.expm1(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :expm1, reason: reason
-    end
-  end
-
-  @impl true
-  @spec floor(Nx.Tensor.t(), t()) :: t()
-  def floor(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.floor(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :floor, reason: reason
-    end
-  end
-
-  @impl true
-  @spec log1p(Nx.Tensor.t(), t()) :: t()
-  def log1p(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.log1p(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :log1p, reason: reason
-    end
-  end
-
-  @impl true
-  @spec rsqrt(Nx.Tensor.t(), t()) :: t()
-  def rsqrt(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.rsqrt(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :rsqrt, reason: reason
-    end
-  end
-
-  @impl true
-  @spec sin(Nx.Tensor.t(), t()) :: t()
-  def sin(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.sin(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :sin, reason: reason
-    end
-  end
-
-  @impl true
-  @spec sinh(Nx.Tensor.t(), t()) :: t()
-  def sinh(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.sinh(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :sinh, reason: reason
-    end
-  end
-
-  @impl true
-  @spec tan(Nx.Tensor.t(), t()) :: t()
-  def tan(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.tan(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :tan, reason: reason
-    end
-  end
-
-  @impl true
-  @spec bitwise_not(Nx.Tensor.t(), t()) :: t()
-  def bitwise_not(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.bitwise_not(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :bitwise_not, reason: reason
-    end
-  end
-
-  @impl true
-  @spec round(Nx.Tensor.t(), t()) :: t()
-  def round(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.round(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :round, reason: reason
-    end
-  end
-
-  @impl true
-  @spec sign(Nx.Tensor.t(), t()) :: t()
-  def sign(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.sign(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :sign, reason: reason
-    end
-  end
-
-  @impl true
-  @spec count_leading_zeros(Nx.Tensor.t(), t()) :: t()
-  def count_leading_zeros(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.count_leading_zeros(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :count_leading_zeros, reason: reason
-    end
-  end
-
-  @impl true
-  @spec population_count(Nx.Tensor.t(), t()) :: t()
-  def population_count(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.population_count(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :population_count, reason: reason
-    end
-  end
-
-  @impl true
-  @spec real(Nx.Tensor.t(), t()) :: t()
-  def real(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.real(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :real, reason: reason
-    end
-  end
-
-  @impl true
-  @spec imag(Nx.Tensor.t(), t()) :: t()
-  def imag(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.imag(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :imag, reason: reason
-    end
-  end
-
-  @impl true
-  @spec is_nan(Nx.Tensor.t(), t()) :: t()
-  def is_nan(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.is_nan(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :is_nan, reason: reason
-    end
-  end
-
-  @impl true
-  @spec is_infinity(Nx.Tensor.t(), t()) :: t()
-  def is_infinity(_out, %__MODULE__{} = a) do
-    with {:ok, nx_a} <- to_nx(a),
-         result = Nx.is_infinity(nx_a),
-         {:ok, bt} <- from_nx(result) do
-      bt
-    else
-      {:error, reason} -> raise Error, op: :is_infinity, reason: reason
-    end
+  def quotient(_out, %T{data: %__MODULE__{} = a}, %T{data: %__MODULE__{} = b}) do
+    # Truncated integer-style division, computed exactly via Nx.
+    nx_fallback(:quotient, fn ->
+      Nx.floor(Nx.divide(to_nx!(a), to_nx!(b)))
+    end)
   end
 
   # ── Reductions ───────────────────────────────────────────────────
 
   @impl true
   @spec sum(Nx.Tensor.t(), t(), keyword()) :: t()
-  def sum(_out, %__MODULE__{} = a, _opts) do
-    a = maybe_cast(a, :f32)
+  def sum(out, %T{data: %__MODULE__{} = a}, opts) do
+    axes = opts[:axes] || []
 
-    with {:ok, ref} <- Nif.sum_tensor(a.ref),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
+    if full_reduction?(a, axes) do
+      a = maybe_cast(a, :f32)
+
+      with {:ok, ref} <- Nif.sum_tensor(a.ref) do
+        shape = Tuple.to_list(Nx.shape(out))
+        wrap(out, %__MODULE__{ref: ref, shape: shape, type: :f32})
+      else
+        {:error, reason} -> raise Error, op: :sum, reason: reason
+      end
     else
-      {:error, reason} -> raise Error, op: :sum, reason: reason
+      nx_fallback(:sum, fn -> Nx.sum(to_nx!(a), axes: axes, keep_axes: false) end)
     end
   end
 
   @impl true
   @spec product(Nx.Tensor.t(), t(), keyword()) :: t()
-  def product(out, %__MODULE__{} = a, opts) do
-    # product via log-sum-exp trick: exp(sum(log(x)))
-    a = maybe_cast(a, :f32)
-    log_a = log(out, a)
-    sum_log = sum(out, log_a, opts)
-    exp(out, sum_log)
+  def product(_out, %T{data: %__MODULE__{} = a}, opts) do
+    # exp(sum(log(x))) is only valid for strictly positive inputs, so
+    # compute the product exactly via Nx instead.
+    nx_fallback(:product, fn ->
+      Nx.product(to_nx!(a), axes: opts[:axes], keep_axes: false)
+    end)
   end
 
   @impl true
   @spec reduce_max(Nx.Tensor.t(), t(), keyword()) :: t()
-  def reduce_max(_out, %__MODULE__{} = a, _opts) do
-    a = maybe_cast(a, :f32)
+  def reduce_max(out, %T{data: %__MODULE__{} = a}, opts) do
+    axes = opts[:axes] || []
 
-    with {:ok, ref} <- Nif.max_tensor(a.ref),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
+    if full_reduction?(a, axes) do
+      a = maybe_cast(a, :f32)
+
+      with {:ok, ref} <- Nif.max_tensor(a.ref) do
+        shape = Tuple.to_list(Nx.shape(out))
+        wrap(out, %__MODULE__{ref: ref, shape: shape, type: :f32})
+      else
+        {:error, reason} -> raise Error, op: :reduce_max, reason: reason
+      end
     else
-      {:error, reason} -> raise Error, op: :reduce_max, reason: reason
+      nx_fallback(:reduce_max, fn -> Nx.reduce_max(to_nx!(a), axes: axes, keep_axes: false) end)
     end
   end
 
   @impl true
   @spec reduce_min(Nx.Tensor.t(), t(), keyword()) :: t()
-  def reduce_min(_out, %__MODULE__{} = a, _opts) do
-    a = maybe_cast(a, :f32)
+  def reduce_min(out, %T{data: %__MODULE__{} = a}, opts) do
+    axes = opts[:axes] || []
 
-    with {:ok, ref} <- Nif.min_tensor(a.ref),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
+    if full_reduction?(a, axes) do
+      a = maybe_cast(a, :f32)
+
+      with {:ok, ref} <- Nif.min_tensor(a.ref) do
+        shape = Tuple.to_list(Nx.shape(out))
+        wrap(out, %__MODULE__{ref: ref, shape: shape, type: :f32})
+      else
+        {:error, reason} -> raise Error, op: :reduce_min, reason: reason
+      end
     else
-      {:error, reason} -> raise Error, op: :reduce_min, reason: reason
+      nx_fallback(:reduce_min, fn -> Nx.reduce_min(to_nx!(a), axes: axes, keep_axes: false) end)
     end
   end
 
   @impl true
   @spec argmax(Nx.Tensor.t(), t(), keyword()) :: t()
-  def argmax(_out, %__MODULE__{} = a, opts) do
-    # Fallback: use max_tensor for single axis, or Nx for multiple axes
-    axes = opts[:axes] || []
-
-    case axes do
-      [_axis] ->
-        a = maybe_cast(a, :f32)
-
-        with {:ok, ref} <- Nif.max_tensor(a.ref),
-             {:ok, shape} <- Nif.tensor_shape(ref) do
-          %__MODULE__{ref: ref, shape: shape, type: :f32}
-        else
-          {:error, reason} -> raise Error, op: :argmax, reason: reason
-        end
-
-      _ ->
-        with {:ok, nx_a} <- to_nx(a),
-             result = Nx.argmax(nx_a, axes: axes),
-             {:ok, bt} <- from_nx(result) do
-          bt
-        else
-          {:error, reason} -> raise Error, op: :argmax, reason: reason
-        end
-    end
+  def argmax(_out, %T{data: %__MODULE__{} = a}, opts) do
+    # Must return *indices*, not values — compute via Nx.
+    nx_fallback(:argmax, fn ->
+      Nx.argmax(to_nx!(a),
+        axis: opts[:axis],
+        tie_break: opts[:tie_break] || :low,
+        keep_axis: opts[:keep_axis] || false
+      )
+    end)
   end
 
   @impl true
   @spec argmin(Nx.Tensor.t(), t(), keyword()) :: t()
-  def argmin(_out, %__MODULE__{} = a, opts) do
-    # Fallback: use min_tensor for single axis, or Nx for multiple axes
-    axes = opts[:axes] || []
-
-    case axes do
-      [_axis] ->
-        a = maybe_cast(a, :f32)
-
-        with {:ok, ref} <- Nif.min_tensor(a.ref),
-             {:ok, shape} <- Nif.tensor_shape(ref) do
-          %__MODULE__{ref: ref, shape: shape, type: :f32}
-        else
-          {:error, reason} -> raise Error, op: :argmin, reason: reason
-        end
-
-      _ ->
-        with {:ok, nx_a} <- to_nx(a),
-             result = Nx.argmin(nx_a, axes: axes),
-             {:ok, bt} <- from_nx(result) do
-          bt
-        else
-          {:error, reason} -> raise Error, op: :argmin, reason: reason
-        end
-    end
+  def argmin(_out, %T{data: %__MODULE__{} = a}, opts) do
+    nx_fallback(:argmin, fn ->
+      Nx.argmin(to_nx!(a),
+        axis: opts[:axis],
+        tie_break: opts[:tie_break] || :low,
+        keep_axis: opts[:keep_axis] || false
+      )
+    end)
   end
 
   @impl true
   @spec all(Nx.Tensor.t(), t(), keyword()) :: t()
-  def all(out, %__MODULE__{} = a, opts) do
-    # all(x) = min(x) != 0 for boolean tensors
-    reduce_min(out, a, opts)
+  def all(_out, %T{data: %__MODULE__{} = a}, opts) do
+    nx_fallback(:all, fn -> Nx.all(to_nx!(a), axes: opts[:axes], keep_axes: false) end)
   end
 
   @impl true
   @spec any(Nx.Tensor.t(), t(), keyword()) :: t()
-  def any(out, %__MODULE__{} = a, opts) do
-    # any(x) = max(x) != 0 for boolean tensors
-    reduce_max(out, a, opts)
+  def any(_out, %T{data: %__MODULE__{} = a}, opts) do
+    nx_fallback(:any, fn -> Nx.any(to_nx!(a), axes: opts[:axes], keep_axes: false) end)
+  end
+
+  # A reduction is "full" when no axes are given or every axis is reduced.
+  defp full_reduction?(%__MODULE__{shape: shape}, axes),
+    do: axes == [] or length(axes) >= length(shape)
+
+  # Runs `fun` against the plain-Nx view of the tensor and uploads the
+  # result back to Burn. Used for ops without a direct NIF implementation.
+  defp nx_fallback(op, fun) do
+    case from_nx(fun.()) do
+      {:ok, bt} -> bt
+      {:error, reason} -> raise Error, op: op, reason: reason
+    end
+  end
+
+  defp to_nx!(%__MODULE__{} = tensor) do
+    case to_nx(tensor) do
+      {:ok, nx} -> nx
+      {:error, reason} -> raise Error, op: :to_binary, reason: reason
+    end
   end
 
   # ── Linear Algebra ───────────────────────────────────────────────
@@ -1032,36 +513,70 @@ defmodule ExBurn.Backend do
           [non_neg_integer()],
           [non_neg_integer()]
         ) :: t()
-  def dot(
-        _out,
-        %__MODULE__{} = a,
-        _contract_a,
-        _batch_a,
-        %__MODULE__{} = b,
-        _contract_b,
-        _batch_b
-      ) do
-    a = maybe_cast(a, :f32)
-    b = maybe_cast(b, :f32)
+  def dot(out, %T{data: %__MODULE__{} = a}, ca, ba, %T{data: %__MODULE__{} = b}, cb, bb),
+    do: dot_bare(out, a, ca, ba, b, cb, bb)
 
-    with {:ok, ref} <- Nif.matmul_tensor(a.ref, b.ref),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
+  def dot(out, %__MODULE__{} = a, ca, ba, %__MODULE__{} = b, cb, bb),
+    do: dot_bare(out, a, ca, ba, b, cb, bb)
+
+  defp dot_bare(
+         out,
+         %__MODULE__{} = a,
+         contract_a,
+         batch_a,
+         %__MODULE__{} = b,
+         contract_b,
+         batch_b
+       ) do
+    fast_path? =
+      batch_a == [] and batch_b == [] and
+        length(a.shape) >= 2 and length(b.shape) >= 2 and
+        contract_a == [length(a.shape) - 1] and contract_b == [0]
+
+    if fast_path? do
+      # Fast path: plain inner-product-style matmul on the GPU.
+      a = maybe_cast(a, :f32)
+      b = maybe_cast(b, :f32)
+
+      with {:ok, ref} <- Nif.matmul_tensor(a.ref, b.ref),
+           {:ok, shape} <- Nif.tensor_shape(ref) do
+        wrap(out, %__MODULE__{ref: ref, shape: shape, type: :f32})
+      else
+        {:error, reason} -> raise Error, op: :dot, reason: reason
+      end
     else
-      {:error, reason} -> raise Error, op: :dot, reason: reason
+      # General contraction — compute exactly via Nx.
+      nx_fallback(:dot, fn ->
+        Nx.dot(
+          to_nx!(a),
+          contract_a,
+          batch_a,
+          to_nx!(b),
+          contract_b,
+          batch_b
+        )
+      end)
     end
   end
 
   @impl true
   @spec transpose(Nx.Tensor.t(), t(), [non_neg_integer()]) :: t()
-  def transpose(_out, %__MODULE__{} = a, _axes) do
+  def transpose(out, %T{data: %__MODULE__{} = a}, axes) do
     a = maybe_cast(a, :f32)
+    rank = length(a.shape)
+    default_axes = Enum.to_list((rank - 1)..0//-1)
 
-    with {:ok, ref} <- Nif.transpose_tensor(a.ref),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
-    else
-      {:error, reason} -> raise Error, op: :transpose, reason: reason
+    cond do
+      rank == 2 and (axes == [1, 0] or axes == [] or axes == nil) ->
+        with {:ok, ref} <- Nif.transpose_tensor(a.ref),
+             {:ok, shape} <- Nif.tensor_shape(ref) do
+          wrap(out, %__MODULE__{ref: ref, shape: shape, type: :f32})
+        else
+          {:error, reason} -> raise Error, op: :transpose, reason: reason
+        end
+
+      true ->
+        nx_fallback(:transpose, fn -> Nx.transpose(to_nx!(a), axes: axes || default_axes) end)
     end
   end
 
@@ -1069,13 +584,13 @@ defmodule ExBurn.Backend do
 
   @impl true
   @spec reshape(Nx.Tensor.t(), t()) :: t()
-  def reshape(out, %__MODULE__{} = a) do
+  def reshape(out, %T{data: %__MODULE__{} = a}) do
     a = maybe_cast(a, :f32)
     shape_list = Tuple.to_list(Nx.shape(out))
 
     with {:ok, ref} <- Nif.reshape_tensor(a.ref, shape_list),
          {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
+      wrap(out, %__MODULE__{ref: ref, shape: shape, type: :f32})
     else
       {:error, reason} -> raise Error, op: :reshape, reason: reason
     end
@@ -1083,7 +598,7 @@ defmodule ExBurn.Backend do
 
   @impl true
   @spec squeeze(Nx.Tensor.t(), t(), [non_neg_integer()]) :: t()
-  def squeeze(_out, %__MODULE__{} = a, axes) do
+  def squeeze(out, %T{data: %__MODULE__{} = a}, axes) do
     a = maybe_cast(a, :f32)
     current_shape = a.shape
 
@@ -1095,7 +610,7 @@ defmodule ExBurn.Backend do
 
     with {:ok, ref} <- Nif.reshape_tensor(a.ref, new_shape),
          {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
+      wrap(out, %__MODULE__{ref: ref, shape: shape, type: :f32})
     else
       {:error, reason} -> raise Error, op: :squeeze, reason: reason
     end
@@ -1103,13 +618,13 @@ defmodule ExBurn.Backend do
 
   @impl true
   @spec broadcast(Nx.Tensor.t(), t(), tuple(), [non_neg_integer()]) :: t()
-  def broadcast(_out, %__MODULE__{} = a, shape, _axes) do
+  def broadcast(out, %T{data: %__MODULE__{} = a}, shape, _axes) do
     a = maybe_cast(a, :f32)
     shape_list = Tuple.to_list(shape)
 
     with {:ok, ref} <- Nif.broadcast_tensor(a.ref, shape_list),
          {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
+      wrap(out, %__MODULE__{ref: ref, shape: shape, type: :f32})
     else
       {:error, reason} -> raise Error, op: :broadcast, reason: reason
     end
@@ -1117,7 +632,12 @@ defmodule ExBurn.Backend do
 
   @impl true
   @spec pad(Nx.Tensor.t(), t(), t(), [{non_neg_integer(), non_neg_integer()}]) :: t()
-  def pad(_out, %__MODULE__{} = a, pad_value, padding_config) do
+  def pad(out, %T{data: %__MODULE__{} = a}, %T{data: %__MODULE__{} = pv}, cfg),
+    do: pad_bare(out, a, pv, cfg)
+
+  def pad(out, %__MODULE__{} = a, %__MODULE__{} = pv, cfg), do: pad_bare(out, a, pv, cfg)
+
+  defp pad_bare(_out, %__MODULE__{} = a, pad_value, padding_config) do
     # Convert to Nx, pad using Nx.pad/3, then convert back.
     # Nx.pad handles arbitrary padding configurations correctly.
     with {:ok, nx_a} <- to_nx(a),
@@ -1133,91 +653,86 @@ defmodule ExBurn.Backend do
   @impl true
   @spec slice(Nx.Tensor.t(), t(), [non_neg_integer()], [non_neg_integer()], [non_neg_integer()]) ::
           t()
-  def slice(_out, %__MODULE__{} = a, start_indices, lengths, _strides) do
+  def slice(_out, %T{data: %__MODULE__{} = a}, start_indices, lengths, strides) do
     a = maybe_cast(a, :f32)
 
-    ranges =
-      Enum.zip([start_indices, lengths])
-      |> Enum.map(fn {s, l} -> {s, s + l, 1} end)
-
-    with {:ok, ref} <- ExBurn.NifHelper.slice_tensor(a.ref, ranges),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
-    else
-      {:error, reason} -> raise Error, op: :slice, reason: reason
-    end
+    nx_fallback(:slice, fn ->
+      to_nx!(a) |> Nx.slice(start_indices, lengths, strides: strides)
+    end)
   end
 
   @impl true
   @spec concatenate(Nx.Tensor.t(), [t()], non_neg_integer()) :: t()
-  def concatenate(_out, [%__MODULE__{} = first | rest], _axis) when is_list(rest) do
-    all = [first | rest]
-    all_f32 = Enum.map(all, &maybe_cast(&1, :f32))
+  def concatenate(_out, tensors, axis) do
+    all_f32 = Enum.map(tensors, &maybe_cast(&1, :f32))
+    one_dimensional? = Enum.all?(all_f32, &(length(&1.shape) == 1))
 
-    result =
-      Enum.reduce(all_f32, fn b, a ->
-        with {:ok, ref} <- Nif.concat_tensor(a.ref, b.ref),
+    if axis == 0 and one_dimensional? do
+      # Fast path: 1D concatenation runs on the GPU via the NIF.
+      [first | rest] = all_f32
+
+      Enum.reduce(rest, first, fn b, acc ->
+        with {:ok, ref} <- Nif.concat_tensor(acc.ref, b.ref),
              {:ok, shape} <- Nif.tensor_shape(ref) do
           %__MODULE__{ref: ref, shape: shape, type: :f32}
         else
           {:error, reason} -> raise Error, op: :concatenate, reason: reason
         end
       end)
-
-    result
+    else
+      # General case — compute exactly via Nx for correct axis handling.
+      nx_fallback(:concatenate, fn ->
+        all_f32 |> Enum.map(&to_nx!/1) |> Nx.concatenate(axis: axis)
+      end)
+    end
   end
 
   @impl true
   @spec stack(Nx.Tensor.t(), [t()], non_neg_integer()) :: t()
   def stack(out, tensors, axis) do
-    expanded =
-      Enum.map(tensors, fn t ->
-        new_shape = List.to_tuple(expand_shape(t.shape, axis))
-        new_out = Nx.broadcast(Nx.tensor(0.0, type: :f32), new_shape)
-        reshape(new_out, t)
-      end)
+    expanded = Enum.map(tensors, &stack_expand(&1, axis))
+    concatenate(out, expanded, axis)
+  end
 
-    [first | rest] = expanded
-    concatenate(out, [first | rest], axis)
+  # Reshapes one input to insert the stacked axis. Accepts both wrapped
+  # tensors and bare backend structs; concatenate/3 expects bare structs.
+  defp stack_expand(%T{data: %__MODULE__{} = data}, axis), do: stack_expand(data, axis)
+
+  defp stack_expand(%__MODULE__{shape: shape, type: type} = data, axis) do
+    wrapper = %T{
+      data: data,
+      type: burn_to_nx_type(type),
+      shape: List.to_tuple(shape),
+      names: List.duplicate(nil, length(shape))
+    }
+
+    new_out = Nx.broadcast(Nx.tensor(0.0, type: :f32), List.to_tuple(expand_shape(shape, axis)))
+
+    case reshape(new_out, wrapper) do
+      %T{data: %__MODULE__{} = reshaped} -> reshaped
+    end
   end
 
   @impl true
   @spec reverse(Nx.Tensor.t(), t(), [non_neg_integer()]) :: t()
-  def reverse(_out, %__MODULE__{} = a, axes) do
+  def reverse(_out, %T{data: %__MODULE__{} = a}, axes) do
     a = maybe_cast(a, :f32)
 
-    ranges =
-      a.shape
-      |> Enum.with_index()
-      |> Enum.map(fn {dim, idx} ->
-        if idx in axes do
-          {dim - 1, -1, -1}
-        else
-          {0, dim, 1}
-        end
-      end)
-
-    with {:ok, ref} <- ExBurn.NifHelper.slice_tensor(a.ref, ranges),
-         {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
-    else
-      {:error, reason} -> raise Error, op: :reverse, reason: reason
-    end
+    nx_fallback(:reverse, fn -> Nx.reverse(to_nx!(a), axes: axes) end)
   end
 
   # ── Selection ────────────────────────────────────────────────────
 
   @impl true
   @spec select(Nx.Tensor.t(), t(), t(), t()) :: t()
-  def select(out, %__MODULE__{} = pred, %__MODULE__{} = on_true, %__MODULE__{} = on_false) do
-    pred = maybe_cast(pred, :f32)
-    on_true = maybe_cast(on_true, :f32)
-    on_false = maybe_cast(on_false, :f32)
-
-    term1 = multiply(out, pred, on_true)
-    one_minus_pred = subtract(out, constant_from_val(1.0, pred, pred), pred)
-    term2 = multiply(out, one_minus_pred, on_false)
-    add(out, term1, term2)
+  def select(_out, %T{data: %__MODULE__{} = pred}, %T{data: %__MODULE__{} = on_true}, %T{
+        data: %__MODULE__{} = on_false
+      }) do
+    # Exact semantics via Nx (the previous arithmetic encoding only worked
+    # for 0/1 float predicates of identical shapes).
+    nx_fallback(:select, fn ->
+      Nx.select(to_nx!(pred), to_nx!(on_true), to_nx!(on_false))
+    end)
   end
 
   # ── Random ───────────────────────────────────────────────────────
@@ -1231,7 +746,7 @@ defmodule ExBurn.Backend do
 
     with {:ok, ref} <- ExBurn.NifHelper.random_tensor(shape, Atom.to_string(type), low, high),
          {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: type}
+      wrap(out, %__MODULE__{ref: ref, shape: shape, type: type})
     else
       {:error, reason} ->
         raise Error, op: :random_uniform, reason: reason
@@ -1266,7 +781,7 @@ defmodule ExBurn.Backend do
 
     with {:ok, ref} <- Nif.eye_tensor(n, :f32),
          {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
+      wrap(out, %__MODULE__{ref: ref, shape: shape, type: :f32})
     else
       {:error, reason} -> raise Error, op: :eye, reason: reason
     end
@@ -1281,7 +796,7 @@ defmodule ExBurn.Backend do
 
     with {:ok, ref} <- Nif.iota_tensor(shape, axis_idx, :f32),
          {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
+      wrap(out, %__MODULE__{ref: ref, shape: shape, type: :f32})
     else
       {:error, reason} -> raise Error, op: :iota, reason: reason
     end
@@ -1291,7 +806,15 @@ defmodule ExBurn.Backend do
 
   @impl true
   @spec clip(Nx.Tensor.t(), t(), t(), t()) :: t()
-  def clip(_out, %__MODULE__{} = a, %__MODULE__{} = min, %__MODULE__{} = max) do
+  def clip(out, %T{data: %__MODULE__{} = a}, %T{data: %__MODULE__{} = min}, %T{
+        data: %__MODULE__{} = max
+      }),
+      do: clip_bare(out, a, min, max)
+
+  def clip(out, %__MODULE__{} = a, %__MODULE__{} = min, %__MODULE__{} = max),
+    do: clip_bare(out, a, min, max)
+
+  defp clip_bare(_out, %__MODULE__{} = a, %__MODULE__{} = min, %__MODULE__{} = max) do
     with {:ok, nx_a} <- to_nx(a),
          {:ok, nx_min} <- to_nx(min),
          {:ok, nx_max} <- to_nx(max),
@@ -1307,7 +830,12 @@ defmodule ExBurn.Backend do
 
   @impl true
   @spec conv(Nx.Tensor.t(), t(), t(), keyword()) :: t()
-  def conv(_out, %__MODULE__{} = input, %__MODULE__{} = kernel, opts) do
+  def conv(out, %T{data: %__MODULE__{} = i}, %T{data: %__MODULE__{} = k}, opts),
+    do: conv_bare(out, i, k, opts)
+
+  def conv(out, %__MODULE__{} = i, %__MODULE__{} = k, opts), do: conv_bare(out, i, k, opts)
+
+  defp conv_bare(out, %__MODULE__{} = input, %__MODULE__{} = kernel, opts) do
     input = maybe_cast(input, :f32)
     kernel = maybe_cast(kernel, :f32)
     stride = opts[:stride] || [1, 1]
@@ -1315,92 +843,81 @@ defmodule ExBurn.Backend do
 
     with {:ok, ref} <- ExBurn.NifHelper.conv2d_tensor(input.ref, kernel.ref, stride, padding),
          {:ok, shape} <- Nif.tensor_shape(ref) do
-      %__MODULE__{ref: ref, shape: shape, type: :f32}
+      wrap(out, %__MODULE__{ref: ref, shape: shape, type: :f32})
     else
       {:error, reason} -> raise Error, op: :conv, reason: reason
     end
   end
 
   # ── Window Operations ───────────────────────────────────────────
+  #
+  # These were previously silent no-ops that returned wrong data. They now
+  # raise so callers get a clear signal instead of corrupted results.
 
   @impl true
-  @spec window_sum(Nx.Tensor.t(), t(), keyword(), keyword()) :: t()
-  def window_sum(out, %__MODULE__{} = a, _window_dimensions, opts) do
-    sum(out, a, opts)
-  end
+  def window_sum(_out, _t, _window_dimensions, _opts), do: not_implemented(:window_sum)
+  @impl true
+  def window_max(_out, _t, _window_dimensions, _opts), do: not_implemented(:window_max)
+  @impl true
+  def window_min(_out, _t, _window_dimensions, _opts), do: not_implemented(:window_min)
+  @impl true
+  def window_product(_out, _t, _window_dimensions, _opts), do: not_implemented(:window_product)
 
   @impl true
-  @spec window_max(Nx.Tensor.t(), t(), keyword(), keyword()) :: t()
-  def window_max(out, %__MODULE__{} = a, _window_dimensions, opts) do
-    reduce_max(out, a, opts)
-  end
+  def window_reduce(_out, _t, _acc, _window_dimensions, _opts, _fun),
+    do: not_implemented(:window_reduce)
 
   @impl true
-  @spec window_min(Nx.Tensor.t(), t(), keyword(), keyword()) :: t()
-  def window_min(out, %__MODULE__{} = a, _window_dimensions, opts) do
-    reduce_min(out, a, opts)
-  end
+  def window_scatter_max(_out, _t, _source, _init_value, _window_dimensions, _opts),
+    do: not_implemented(:window_scatter_max)
 
   @impl true
-  @spec window_product(Nx.Tensor.t(), t(), keyword(), keyword()) :: t()
-  def window_product(out, %__MODULE__{} = a, _window_dimensions, opts) do
-    product(out, a, opts)
-  end
-
-  @impl true
-  @spec window_reduce(Nx.Tensor.t(), t(), t(), keyword(), keyword(), fun()) :: t()
-  def window_reduce(out, tensor, acc, _window_dimensions, opts, fun) do
-    reduce(out, tensor, acc, opts, fun)
-  end
-
-  @impl true
-  @spec window_scatter_max(Nx.Tensor.t(), t(), t(), t(), keyword(), keyword()) :: t()
-  def window_scatter_max(_out, _tensor, source, _init_value, _window_dimensions, _opts) do
-    source
-  end
-
-  @impl true
-  @spec window_scatter_min(Nx.Tensor.t(), t(), t(), t(), keyword(), keyword()) :: t()
-  def window_scatter_min(_out, _tensor, source, _init_value, _window_dimensions, _opts) do
-    source
-  end
+  def window_scatter_min(_out, _t, _source, _init_value, _window_dimensions, _opts),
+    do: not_implemented(:window_scatter_min)
 
   # ── Indexed Operations ───────────────────────────────────────────
 
   @impl true
-  @spec indexed_add(Nx.Tensor.t(), t(), t(), t(), keyword()) :: t()
-  def indexed_add(_out, target, _indices, _updates, _opts) do
-    target
-  end
-
+  def indexed_add(_out, _target, _indices, _updates, _opts), do: not_implemented(:indexed_add)
   @impl true
-  @spec indexed_put(Nx.Tensor.t(), t(), t(), t(), keyword()) :: t()
-  def indexed_put(_out, target, _indices, _updates, _opts) do
-    target
-  end
+  def indexed_put(_out, _target, _indices, _updates, _opts), do: not_implemented(:indexed_put)
 
   # ── Reduce ───────────────────────────────────────────────────────
 
   @impl true
   @spec reduce(Nx.Tensor.t(), t(), t(), keyword(), fun()) :: t()
-  def reduce(out, %__MODULE__{} = tensor, _acc, opts, fun) do
+  def reduce(_out, %T{data: %__MODULE__{} = tensor}, acc, opts, fun) do
     axes = opts[:axes] || []
+    acc_value = scalar_value(acc)
 
-    if axes == [] do
-      # Full reduction: apply the reduction function, then reshape to output
-      result = apply_reduce_fun(tensor, fun)
-      reshape(out, result)
-    else
-      # Partial reduction over specific axes
-      apply_reduce_fun(tensor, fun)
-    end
+    # An empty axes list means "no reduction" in Nx — omit it for the
+    # full-reduction case.
+    inner_opts =
+      if axes == [],
+        do: [keep_axes: false],
+        else: [axes: axes, keep_axes: false]
+
+    inner = Nx.reduce(to_nx!(tensor), acc_value, inner_opts, fun)
+    nx_fallback(:reduce, fn -> inner end)
   end
+
+  # Reducer accumulators arrive as bare structs (compiler path), wrapped
+  # tensors (Nx dispatch), or plain numbers.
+  defp scalar_value(%__MODULE__{} = data), do: data |> to_nx!() |> Nx.to_number()
+  defp scalar_value(%T{data: %__MODULE__{} = data}), do: data |> to_nx!() |> Nx.to_number()
+  defp scalar_value(n) when is_number(n), do: n
 
   # ── Gather / Scatter ─────────────────────────────────────────────
 
   @impl true
   @spec gather(Nx.Tensor.t(), t(), t(), keyword()) :: t()
-  def gather(_out, %__MODULE__{} = input, %__MODULE__{} = indices, _opts) do
+  def gather(out, %T{data: %__MODULE__{} = i}, %T{data: %__MODULE__{} = idx}, opts),
+    do: gather_bare(out, i, idx, opts)
+
+  def gather(out, %__MODULE__{} = i, %__MODULE__{} = idx, opts),
+    do: gather_bare(out, i, idx, opts)
+
+  defp gather_bare(_out, %__MODULE__{} = input, %__MODULE__{} = indices, _opts) do
     with {:ok, nx_input} <- to_nx(input),
          {:ok, nx_indices} <- to_nx(indices),
          result = Nx.take(nx_input, nx_indices),
@@ -1413,17 +930,12 @@ defmodule ExBurn.Backend do
 
   @impl true
   @spec put_slice(Nx.Tensor.t(), t(), t(), [non_neg_integer()]) :: t()
-  def put_slice(_out, target, _start_indices, _slice) do
-    target
-  end
+  def put_slice(_out, _target, _start_indices, _slice), do: not_implemented(:put_slice)
 
   # ── FFT ──────────────────────────────────────────────────────────
 
   @impl true
-  @spec fft(Nx.Tensor.t(), t(), keyword()) :: t()
-  def fft(_out, %__MODULE__{} = tensor, _opts) do
-    tensor
-  end
+  def fft(_out, _tensor, _opts), do: not_implemented(:fft)
 
   @impl true
   @spec ifft(Nx.Tensor.t(), t(), keyword()) :: t()
@@ -1434,38 +946,27 @@ defmodule ExBurn.Backend do
   # ── Sort ─────────────────────────────────────────────────────────
 
   @impl true
-  @spec sort(Nx.Tensor.t(), t(), keyword()) :: t()
-  def sort(_out, %__MODULE__{} = a, _opts) do
-    a
-  end
+  def sort(_out, _a, _opts), do: not_implemented(:sort)
 
   @impl true
-  @spec argsort(Nx.Tensor.t(), t(), keyword()) :: t()
-  def argsort(_out, %__MODULE__{} = a, _opts) do
-    a
-  end
+  def argsort(_out, _a, _opts), do: not_implemented(:argsort)
 
   # ── Triangular Solve ─────────────────────────────────────────────
 
   @impl true
-  @spec triangular_solve(Nx.Tensor.t(), t(), t(), keyword()) :: t()
-  def triangular_solve(_out, %__MODULE__{} = _a, %__MODULE__{} = b, _opts) do
-    b
-  end
+  def triangular_solve(_out, _a, _b, _opts), do: not_implemented(:triangular_solve)
 
   # ── Backend Transfer ─────────────────────────────────────────────
 
   @impl true
   @spec backend_copy(t(), atom(), keyword()) :: t()
-  def backend_copy(%__MODULE__{} = tensor, _backend, _opts) do
-    tensor
-  end
+  def backend_copy(%T{data: %__MODULE__{}} = t, _backend, _opts), do: t
+  def backend_copy(%__MODULE__{} = data, _backend, _opts), do: data
 
   @impl true
   @spec backend_transfer(t(), atom(), keyword()) :: t()
-  def backend_transfer(%__MODULE__{} = tensor, _backend, _opts) do
-    tensor
-  end
+  def backend_transfer(%T{data: %__MODULE__{}} = t, _backend, _opts), do: t
+  def backend_transfer(%__MODULE__{} = data, _backend, _opts), do: data
 
   @impl true
   @spec backend_deallocate(t()) :: :ok
@@ -1475,14 +976,14 @@ defmodule ExBurn.Backend do
 
   @impl true
   @spec to_batched(Nx.Tensor.t(), t(), keyword()) :: Enumerable.t()
-  def to_batched(%Nx.Tensor{} = out, %__MODULE__{} = tensor, opts) do
-    batch_size = opts[:batch_size] || 1
-    total_elems = Enum.reduce(tensor.shape, 1, &(&1 * &2))
-    num_batches = div(total_elems, batch_size)
+  def to_batched(_out, _tensor, _opts), do: not_implemented(:to_batched)
 
-    Stream.map(0..max(num_batches - 1, 0), fn _i ->
-      constant(out, 0.0, [])
-    end)
+  # Raises a structured error for callbacks that have no implementation.
+  # Returning wrong data silently is worse than failing loudly.
+  defp not_implemented(op) do
+    raise Error,
+      op: op,
+      reason: "not implemented by ExBurn.Backend — use Nx.BinaryBackend for this operation"
   end
 
   @impl true
@@ -1499,12 +1000,17 @@ defmodule ExBurn.Backend do
   end
 
   @impl true
-  @spec inspect(t(), keyword()) :: Inspect.Algebra.t() | String.t()
-  def inspect(%__MODULE__{} = tensor, inspect_opts) do
-    limit = inspect_opts[:limit] || 5
+  @spec inspect(Nx.Tensor.t(), keyword()) :: Inspect.Algebra.t() | String.t()
+  def inspect(%T{data: %__MODULE__{} = tensor}, inspect_opts) do
+    # Nx dispatches with %Inspect.Opts{} (a map), while direct callers may
+    # pass a keyword list — support both instead of crashing on structs.
+    limit =
+      if is_map(inspect_opts),
+        do: Map.get(inspect_opts, :limit, 50),
+        else: Keyword.get(inspect_opts, :limit, 50)
 
     preview =
-      if Enum.product(tensor.shape) <= limit do
+      if Enum.product(tensor.shape ++ [1]) <= limit do
         case to_nx(tensor) do
           {:ok, nx_tensor} ->
             values = Nx.to_flat_list(nx_tensor) |> Enum.take(limit)
@@ -1517,16 +1023,8 @@ defmodule ExBurn.Backend do
         ""
       end
 
-    Inspect.Algebra.concat(
-      Inspect.Algebra.color("#ExBurn.Tensor<", :map, Inspect.Opts.new(limit: :infinity)),
-      Inspect.Algebra.concat(
-        Inspect.Algebra.color(
-          "shape: #{inspect(tensor.shape)}, type: #{tensor.type}#{preview}",
-          :map,
-          Inspect.Opts.new(limit: :infinity)
-        ),
-        Inspect.Algebra.color(">", :map, Inspect.Opts.new(limit: :infinity))
-      )
+    Inspect.Algebra.string(
+      "#ExBurn.Tensor<shape: #{inspect(tensor.shape)}, type: #{tensor.type}#{preview}>"
     )
   end
 
@@ -1552,44 +1050,16 @@ defmodule ExBurn.Backend do
 
   # ── Private Helpers ──────────────────────────────────────────────
 
-  @spec apply_reduce_fun(t(), fun()) :: t()
-  defp apply_reduce_fun(%__MODULE__{} = tensor, fun) do
-    # Apply the reduction function from the Nx.Backend callback.
-    # The fun receives {output_template, input_tensor} and should
-    # return a reduced tensor. We convert to Nx, apply, and convert back.
-    with {:ok, nx_tensor} <- to_nx(tensor) do
-      # Build an output template with the same shape for the reduction
-      out_template = Nx.tensor(0.0, type: {:f, 32})
-      result = fun.(out_template, nx_tensor)
-      from_nx(result)
-    else
-      {:error, _} -> tensor
-    end
+  @spec nx_to_burn_type(Nx.Type.t()) :: BT.burn_type()
+  defp nx_to_burn_type(_type) do
+    # The NIF layer stores f32 data only, so the backend downcasts every
+    # dtype at this boundary instead of crashing deep in Rust. This is a
+    # documented limitation — see README "Known limitations".
+    :f32
   end
 
-  @spec nx_to_burn_type(Nx.Type.t()) :: atom()
-  defp nx_to_burn_type({:f, 32}), do: :f32
-  defp nx_to_burn_type({:f, 64}), do: :f64
-  defp nx_to_burn_type({:f, 16}), do: :f16
-  defp nx_to_burn_type({:bf, 16}), do: :bf16
-  defp nx_to_burn_type({:s, 32}), do: :i32
-  defp nx_to_burn_type({:s, 64}), do: :i64
-  defp nx_to_burn_type({:s, 16}), do: :i16
-  defp nx_to_burn_type({:s, 8}), do: :i8
-  defp nx_to_burn_type({:u, 8}), do: :u8
-  defp nx_to_burn_type(_), do: :f32
-
-  @spec burn_to_nx_type(atom()) :: Nx.Type.t()
-  defp burn_to_nx_type(:f32), do: {:f, 32}
-  defp burn_to_nx_type(:f64), do: {:f, 64}
-  defp burn_to_nx_type(:f16), do: {:f, 16}
-  defp burn_to_nx_type(:bf16), do: {:bf, 16}
-  defp burn_to_nx_type(:i32), do: {:s, 32}
-  defp burn_to_nx_type(:i64), do: {:s, 64}
-  defp burn_to_nx_type(:i16), do: {:s, 16}
-  defp burn_to_nx_type(:i8), do: {:s, 8}
-  defp burn_to_nx_type(:u8), do: {:u, 8}
-  defp burn_to_nx_type(_), do: {:f, 32}
+  @spec burn_to_nx_type(BT.burn_type()) :: Nx.Type.t()
+  defp burn_to_nx_type(type), do: BT.burn_to_nx(type)
 
   @spec maybe_cast(t(), atom()) :: t()
   defp maybe_cast(%__MODULE__{type: :f32} = t, :f32), do: t
@@ -1613,10 +1083,14 @@ defmodule ExBurn.Backend do
 
     case Nif.tensor_to_binary(ref) do
       {:ok, binary} ->
+        # Pin the host-side view to BinaryBackend: with a flipped global
+        # default backend, leaving it on this backend would make every
+        # nx_fallback body re-enter these callbacks recursively.
         tensor =
           binary
           |> Nx.from_binary(nx_type)
           |> Nx.reshape(List.to_tuple(shape))
+          |> pin_to_binary_backend()
 
         {:ok, tensor}
 
@@ -1625,34 +1099,25 @@ defmodule ExBurn.Backend do
     end
   end
 
+  defp pin_to_binary_backend(%T{data: %Nx.BinaryBackend{}} = t), do: t
+  defp pin_to_binary_backend(t), do: Nx.backend_transfer(t, Nx.BinaryBackend)
+
   @spec from_nx(Nx.Tensor.t()) :: {:ok, t()} | {:error, String.t()}
   defp from_nx(%Nx.Tensor{} = tensor) do
-    data = Nx.to_binary(tensor)
     shape = Tuple.to_list(Nx.shape(tensor))
     type = nx_to_burn_type(Nx.type(tensor))
+
+    # Cast to f32 (value-preserving) since the NIF stores f32 only.
+    data =
+      tensor
+      |> Nx.as_type({:f, 32})
+      |> Nx.to_binary()
 
     case Nif.new_tensor(data, shape, Atom.to_string(type)) do
       {:ok, ref} -> {:ok, %__MODULE__{ref: ref, shape: shape, type: type}}
       {:error, reason} -> {:error, reason}
     end
   end
-
-  @spec constant_from_val(float(), t(), Nx.Tensor.t()) :: t()
-  defp constant_from_val(val, %__MODULE__{type: type} = template, out) do
-    data = encode_val(val, type)
-    shape = Tuple.to_list(Nx.shape(out))
-
-    case Nif.new_tensor(data, shape, Atom.to_string(type)) do
-      {:ok, ref} -> %__MODULE__{ref: ref, shape: shape, type: type}
-      {:error, _} -> template
-    end
-  end
-
-  defp encode_val(val, :f32), do: <<val::float-32-native>>
-  defp encode_val(val, :f64), do: <<val::float-64-native>>
-  defp encode_val(val, :f16), do: <<val::float-16-native>>
-  defp encode_val(val, :bf16), do: <<val::float-16-native>>
-  defp encode_val(val, _), do: <<val::float-32-native>>
 
   @type_precedence %{
     f64: 10,
@@ -1676,5 +1141,17 @@ defmodule ExBurn.Backend do
   defp expand_shape(shape, axis) do
     {list_before, list_after} = Enum.split(shape, axis)
     list_before ++ [1] ++ list_after
+  end
+
+  defimpl Nx.Container do
+    # A Burn tensor resource holds no traversable Nx tensor children —
+    # treat it as an opaque leaf.
+    def unwrap(_data, _fun), do: []
+
+    def reduce(_data, acc, _fun), do: acc
+
+    def traverse(data, acc, _fun), do: {data, acc}
+
+    def serialize(_data), do: raise("cannot serialize ExBurn.Backend data directly")
   end
 end

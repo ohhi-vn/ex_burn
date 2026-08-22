@@ -34,8 +34,11 @@ defmodule ExBurn.Model do
   GPU kernel fusion.
   """
 
+  # Axon structs are referenced directly; the dialyzer PLT includes axon
+  # (see :dialyzer config in mix.exs).
   @type t :: %__MODULE__{
           axon_model: Axon.ModelState.t(),
+          axon_graph: Axon.t() | nil,
           loss_fn: atom(),
           optimizer: atom(),
           optimizer_state: map(),
@@ -43,15 +46,18 @@ defmodule ExBurn.Model do
           compiled: boolean(),
           device: :cpu | :gpu,
           weight_decay: float(),
-          frozen_layers: MapSet.t()
+          frozen_layers: MapSet.t(),
+          predict_fn: (map(), Nx.Tensor.t() -> Nx.Tensor.t()) | nil
         }
 
   defstruct [
     :axon_model,
+    :axon_graph,
     :loss_fn,
     :optimizer,
     :optimizer_state,
     :params,
+    :predict_fn,
     compiled: false,
     device: :gpu,
     weight_decay: 0.0,
@@ -80,8 +86,15 @@ defmodule ExBurn.Model do
 
     An `ExBurn.Model` struct ready for training.
   """
-  @spec compile(Axon.ModelState.t() | Axon.t(), keyword()) :: t()
-  def compile(%Axon.ModelState{} = axon_model, opts \\ []) do
+  @spec compile(Axon.t() | Axon.ModelState.t(), keyword()) :: t()
+  def compile(axon_model_or_graph, opts \\ [])
+
+  def compile(%Axon{} = axon_graph, opts) do
+    axon_model = compile_to_model_state(axon_graph, opts)
+    compile(axon_model, Keyword.put(opts, :axon_graph, axon_graph))
+  end
+
+  def compile(%Axon.ModelState{} = axon_model, opts) do
     loss_fn = Keyword.get(opts, :loss, :cross_entropy)
     optimizer = Keyword.get(opts, :optimizer, :adam)
     learning_rate = Keyword.get(opts, :learning_rate, 0.001)
@@ -94,8 +107,23 @@ defmodule ExBurn.Model do
     # Initialize optimizer state
     optimizer_state = init_optimizer(optimizer, learning_rate, params)
 
+    # Build the predict function once — Axon.build/1 traces the graph and is
+    # expensive, so it must not run on every forward/predict call.
+    # Axon.build only accepts an %Axon{} graph, so models compiled directly
+    # from a ModelState have no predict_fn until a graph is provided.
+    predict_fn =
+      case Keyword.get(opts, :axon_graph) do
+        %Axon{} = graph ->
+          {_init_fn, predict_fn} = Axon.build(graph)
+          predict_fn
+
+        _ ->
+          nil
+      end
+
     new(
       axon_model: axon_model,
+      axon_graph: Keyword.get(opts, :axon_graph),
       loss_fn: loss_fn,
       optimizer: optimizer,
       optimizer_state: optimizer_state,
@@ -103,7 +131,8 @@ defmodule ExBurn.Model do
       compiled: true,
       device: device,
       weight_decay: weight_decay,
-      frozen_layers: MapSet.new()
+      frozen_layers: MapSet.new(),
+      predict_fn: predict_fn
     )
   end
 
@@ -130,11 +159,11 @@ defmodule ExBurn.Model do
     {:error, "Model not compiled. Call ExBurn.Model.compile/2 first."}
   end
 
-  def forward(%__MODULE__{axon_model: axon_model, params: params}, %Nx.Tensor{} = input) do
-    # Build the expression graph with params bound, then compile
-    # through ExBurn.Defn.Compiler for GPU execution.
+  def forward(%__MODULE__{params: params} = model, %Nx.Tensor{} = input) do
     try do
-      result = axon_forward(axon_model, params, input)
+      # Axon expects the nested %{layer => %{param => tensor}} shape; stored
+      # params are flat "layer.param" keys.
+      result = axon_forward(model, unflatten_params(params), input)
       {:ok, result}
     rescue
       e ->
@@ -154,12 +183,12 @@ defmodule ExBurn.Model do
     {:error, "Model not compiled. Call ExBurn.Model.compile/2 first."}
   end
 
-  def predict(%__MODULE__{axon_model: model, params: params}, %Nx.Tensor{} = input) do
-    # Axon.build/2 works with both %Axon{} and %Axon.ModelState{}.
-    # It returns {init_fn, predict_fn} where predict_fn takes {params, input}.
-    {_init_fn, predict_fn} = Axon.build(model, params)
-    output = predict_fn.(params, input)
-    {:ok, output}
+  def predict(%__MODULE__{predict_fn: nil}, _input) do
+    {:error, "Predict failed: no Axon graph available for inference"}
+  end
+
+  def predict(%__MODULE__{} = model, %Nx.Tensor{} = input) do
+    {:ok, axon_forward(model, unflatten_params(model.params), input)}
   rescue
     e -> {:error, "Predict failed: #{Exception.message(e)}"}
   end
@@ -176,7 +205,7 @@ defmodule ExBurn.Model do
   """
   @spec compute_loss(t(), Nx.Tensor.t(), Nx.Tensor.t()) ::
           {:ok, Nx.Tensor.t()} | {:error, String.t()}
-  def compute_loss(%__MODULE__{loss_fn: :cross_entropy, weight_decay: wd}, pred, target) do
+  def compute_loss(%__MODULE__{loss_fn: :cross_entropy}, pred, target) do
     # Numerically stable cross-entropy: log_softmax then nll_loss
     pred_max = Nx.reduce_max(pred, axes: [-1], keep_axes: true)
     pred_stable = Nx.subtract(pred, pred_max)
@@ -194,20 +223,15 @@ defmodule ExBurn.Model do
         batch_indices = Nx.iota({batch_size})
         indices = Nx.stack([batch_indices, target], axis: -1)
 
-        Nx.take(log_probs, indices)
+        # `indices` holds full {batch_idx, class_idx} index tuples, so use
+        # gather (not take, which indexes only along one axis).
+        Nx.gather(log_probs, indices)
         |> Nx.mean()
         |> Nx.negate()
       end
 
-    # Add L2 regularization if weight_decay is set
-    loss =
-      if wd > 0.0 do
-        # Note: actual L2 penalty is added during optimizer step
-        loss
-      else
-        loss
-      end
-
+    # Note: L2 regularization is applied as an explicit gradient term in
+    # ExBurn.Training (add_weight_decay_grads/3), not inside the loss.
     {:ok, loss}
   end
 
@@ -388,18 +412,20 @@ defmodule ExBurn.Model do
     A map with `:output_shape` and `:output_type` keys.
   """
   @spec forward_pattern(t()) :: %{output_shape: tuple() | nil, output_type: atom()}
-  def forward_pattern(%__MODULE__{axon_model: axon_model}) do
-    # Axon.get_output_shape returns the output shape given input specs
-    # We use a dummy input to trace the shape
+  def forward_pattern(%__MODULE__{axon_graph: %Axon{} = graph}) do
+    # Trace the output shape/type through Axon itself (no data is executed).
     try do
-      {expr, _} = Axon.build(axon_model, %{})
-      shape = Nx.shape(expr)
-      type = Nx.type(expr)
-      %{output_shape: shape, output_type: type}
+      input = Nx.template(input_shape(graph), {:f, 32})
+      output_template = Axon.get_output_shape(graph, input)
+      %{output_shape: Nx.shape(output_template), output_type: Nx.type(output_template)}
     rescue
       _ ->
         %{output_shape: nil, output_type: :f32}
     end
+  end
+
+  def forward_pattern(_model) do
+    %{output_shape: nil, output_type: :f32}
   end
 
   # ── Summary ──────────────────────────────────────────────────────
@@ -583,25 +609,65 @@ defmodule ExBurn.Model do
       result = ExBurn.Model.benchmark(model, input, warmup: 5, runs: 20)
       IO.puts("Average: #{result.avg_ms}ms")
   """
-  @spec benchmark(t(), Nx.Tensor.t(), keyword()) :: map()
-  def benchmark(%__MODULE__{} = model, %Nx.Tensor{} = input, opts \\ []) do
+  @spec benchmark(t(), Nx.Tensor.t() | {Nx.Tensor.t(), Nx.Tensor.t()}, keyword()) :: map()
+  def benchmark(model, input, opts \\ [])
+
+  def benchmark(
+        %__MODULE__{} = model,
+        {%Nx.Tensor{} = input, %Nx.Tensor{} = target},
+        opts
+      ) do
     warmup = Keyword.get(opts, :warmup, 3)
     runs = Keyword.get(opts, :runs, 10)
 
     # Warmup
-    Enum.each(1..warmup, fn ->
+    Enum.each(1..warmup, fn _ ->
+      run_benchmark_step(model, input, target)
+    end)
+
+    # Benchmark
+    times =
+      Enum.map(1..runs, fn _ ->
+        start = System.monotonic_time(:microsecond)
+        _result = run_benchmark_step(model, input, target)
+        System.monotonic_time(:microsecond) - start
+      end)
+
+    benchmark_stats(times, warmup, runs)
+  end
+
+  def benchmark(%__MODULE__{} = model, %Nx.Tensor{} = input, opts) do
+    warmup = Keyword.get(opts, :warmup, 3)
+    runs = Keyword.get(opts, :runs, 10)
+
+    # Warmup
+    Enum.each(1..warmup, fn _ ->
       ExBurn.Model.predict(model, input)
     end)
 
     # Benchmark
     times =
-      Enum.map(1..runs, fn ->
+      Enum.map(1..runs, fn _ ->
         start = System.monotonic_time(:microsecond)
-        ExBurn.Model.predict(model, input)
+        _result = ExBurn.Model.predict(model, input)
         System.monotonic_time(:microsecond) - start
       end)
 
-    times_ms = Enum.map(times, &(&1 / 1000))
+    benchmark_stats(times, warmup, runs)
+  end
+
+  defp run_benchmark_step(model, input, target) do
+    case ExBurn.Model.predict(model, input) do
+      {:ok, pred} ->
+        ExBurn.Model.compute_loss(model, pred, target)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp benchmark_stats(times_ms_input, warmup, runs) do
+    times_ms = Enum.map(times_ms_input, &(&1 / 1000))
     avg = Enum.sum(times_ms) / length(times_ms)
     min = Enum.min(times_ms)
     max = Enum.max(times_ms)
@@ -634,7 +700,13 @@ defmodule ExBurn.Model do
     cloned_params =
       Enum.map(model.params, fn
         {key, %Nx.Tensor{} = tensor} ->
-          {key, Nx.tensor(Nx.to_list(tensor), type: Nx.type(tensor))}
+          # Copy via binary round-trip — much faster than to_list for
+          # large parameter tensors.
+          {key,
+           tensor
+           |> Nx.to_binary()
+           |> Nx.from_binary(Nx.type(tensor))
+           |> Nx.reshape(Nx.shape(tensor))}
 
         {key, value} ->
           {key, value}
@@ -710,7 +782,7 @@ defmodule ExBurn.Model do
               {key,
                %{
                  "shape" => Tuple.to_list(Nx.shape(tensor)),
-                 "type" => Atom.to_string(Nx.type(tensor)),
+                 "type" => nx_type_to_string(Nx.type(tensor)),
                  "data" => Nx.to_list(tensor)
                }}
 
@@ -775,17 +847,55 @@ defmodule ExBurn.Model do
 
   # ── Private Functions ────────────────────────────────────────────
 
-  # Forward pass using Axon.build/2.
-  # Axon.build/2 works with both %Axon{} and %Axon.ModelState{}.
-  # It returns {init_fn, predict_fn} where predict_fn takes {params, input}.
-  defp axon_forward(axon_model, params, %Nx.Tensor{} = input) do
-    {_init_fn, predict_fn} = Axon.build(axon_model, params)
-    predict_fn.(params, input)
+  # Forward pass through the cached Axon predict function.
+  # `params` must be the nested `%{layer => %{param => tensor}}` map that
+  # Axon expects (use `unflatten_params/1` for flat "layer.param" keys).
+  # It is wrapped in a %Axon.ModelState{} — passing bare maps is deprecated.
+  defp axon_forward(%__MODULE__{} = model, params, %Nx.Tensor{} = input) do
+    model.predict_fn.(Axon.ModelState.new(params), input)
   rescue
-    e -> raise ExBurn.Error, op: :forward, reason: Exception.message(e)
+    e -> reraise ExBurn.Error, [op: :forward, reason: Exception.message(e)], __STACKTRACE__
   end
 
-  # ── Parameter Initialization ──────────────────────────────────────
+  # ── Parameter Initialization ──────────────────────────────────
+
+  # Compiles a %Axon{} graph into a ModelState using its init_fn with
+  # a template matching the graph's input shape.
+  defp compile_to_model_state(%Axon{} = graph, _opts) do
+    {init_fn, _} = Axon.build(graph)
+    shape = input_shape(graph)
+    template = Nx.template(shape, :f32)
+    init_fn.(template, Axon.ModelState.empty())
+  end
+
+  defp input_shape(%Axon{} = graph) do
+    graph.nodes
+    |> Map.values()
+    |> Enum.find(&(&1.op == :input))
+    |> case do
+      %{opts: opts} ->
+        shape = Keyword.get(opts, :shape, {1, 2})
+
+        case Tuple.to_list(shape) do
+          [nil | dims] -> List.to_tuple([1 | dims])
+          dims -> List.to_tuple(dims)
+        end
+
+      _ ->
+        {1, 2}
+    end
+  end
+
+  # Rebuilds the nested %Axon.ModelState.data structure
+  # (layer => %{param => tensor}) from the flattened "layer.param" keys.
+  defp unflatten_params(flat) when is_map(flat) do
+    Enum.reduce(flat, %{}, fn {k, v}, acc ->
+      case String.split(k, ".", parts: 2) do
+        [layer, p] -> Map.update(acc, layer, %{p => v}, &Map.put(&1, p, v))
+        [layer] -> Map.put(acc, layer, v)
+      end
+    end)
+  end
 
   defp initialize_params(%Axon.ModelState{} = model, _device) do
     # Axon.ModelState.data is a map of layer_name => %{param_name => tensor}
@@ -910,10 +1020,6 @@ defmodule ExBurn.Model do
 
     layer_groups =
       Enum.reduce(params, %{}, fn
-        <<>>, _acc ->
-          # skip empty keys
-          %{}
-
         {key, tensor}, acc ->
           case split_layer_key(key) do
             {layer_name, param_type} ->
@@ -983,22 +1089,61 @@ defmodule ExBurn.Model do
     name_lower = String.downcase(layer_name)
 
     cond do
-      String.contains?(name_lower, "conv") -> :conv
-      String.contains?(name_lower, "dense") || String.contains?(name_lower, "linear") -> :dense
-      String.contains?(name_lower, "lstm") -> :lstm
-      String.contains?(name_lower, "gru") -> :gru
-      String.contains?(name_lower, "embed") -> :embedding
-      String.contains?(name_lower, "norm") -> :normalization
-      String.contains?(name_lower, "dropout") -> :dropout
-      String.contains?(name_lower, "attention") -> :attention
-      String.contains?(name_lower, "batchnorm") -> :batch_norm
-      String.contains?(name_lower, "layernorm") -> :layer_norm
-      Map.has_key?(param_map, "kernel") || Map.has_key?(param_map, "weight") -> :linear
-      true -> :unknown
+      String.contains?(name_lower, "conv") ->
+        :conv
+
+      String.contains?(name_lower, "dense") || String.contains?(name_lower, "linear") ->
+        :dense
+
+      String.contains?(name_lower, "lstm") ->
+        :lstm
+
+      String.contains?(name_lower, "gru") ->
+        :gru
+
+      String.contains?(name_lower, "embed") ->
+        :embedding
+
+      String.contains?(name_lower, "norm") ->
+        :normalization
+
+      String.contains?(name_lower, "dropout") ->
+        :dropout
+
+      String.contains?(name_lower, "attention") ->
+        :attention
+
+      String.contains?(name_lower, "batchnorm") ->
+        :batch_norm
+
+      String.contains?(name_lower, "layernorm") ->
+        :layer_norm
+
+      Map.has_key?(param_map, "kernel") || Map.has_key?(param_map, "weight") ->
+        :linear
+
+      true ->
+        :unknown
     end
   end
 
-  # ── JSON Import Helpers ─────────────────────────────────────────
+  # ── JSON Import Helpers ───────────────────
+
+  defp nx_type_to_string({:f, 32}), do: "f32"
+
+  defp nx_type_to_string({:f, 64}), do: "f64"
+
+  defp nx_type_to_string({:f, 16}), do: "f16"
+
+  defp nx_type_to_string({:bf, 16}), do: "bf16"
+
+  defp nx_type_to_string({:s, 32}), do: "s32"
+
+  defp nx_type_to_string({:s, 64}), do: "s64"
+  defp nx_type_to_string({:s, 16}), do: "s16"
+  defp nx_type_to_string({:s, 8}), do: "s8"
+  defp nx_type_to_string({:u, 8}), do: "u8"
+  defp nx_type_to_string(_), do: "f32"
 
   defp parse_nx_type("f32"), do: {:f, 32}
   defp parse_nx_type("f64"), do: {:f, 64}

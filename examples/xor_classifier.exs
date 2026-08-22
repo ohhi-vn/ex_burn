@@ -90,19 +90,19 @@ defmodule XORClassifier do
     IO.puts("\nPredictions on XOR truth table:")
 
     IO.puts(
-      "  (0,0) -> #{predict(trained, Nx.tensor([[0, 0]], type: {:f, 32})) |> Nx.to_number() |> round_pred()}"
+      "  (0,0) -> #{predict(trained, Nx.tensor([[0, 0]], type: {:f, 32})) |> Nx.squeeze() |> Nx.to_number() |> round_pred()}"
     )
 
     IO.puts(
-      "  (0,1) -> #{predict(trained, Nx.tensor([[0, 1]], type: {:f, 32})) |> Nx.to_number() |> round_pred()}"
+      "  (0,1) -> #{predict(trained, Nx.tensor([[0, 1]], type: {:f, 32})) |> Nx.squeeze() |> Nx.to_number() |> round_pred()}"
     )
 
     IO.puts(
-      "  (1,0) -> #{predict(trained, Nx.tensor([[1, 0]], type: {:f, 32})) |> Nx.to_number() |> round_pred()}"
+      "  (1,0) -> #{predict(trained, Nx.tensor([[1, 0]], type: {:f, 32})) |> Nx.squeeze() |> Nx.to_number() |> round_pred()}"
     )
 
     IO.puts(
-      "  (1,1) -> #{predict(trained, Nx.tensor([[1, 1]], type: {:f, 32})) |> Nx.to_number() |> round_pred()}"
+      "  (1,1) -> #{predict(trained, Nx.tensor([[1, 1]], type: {:f, 32})) |> Nx.squeeze() |> Nx.to_number() |> round_pred()}"
     )
 
     # Compute accuracy on validation set

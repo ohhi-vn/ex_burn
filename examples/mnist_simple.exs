@@ -20,10 +20,14 @@ defmodule MNISTSimple do
   Architecture: 784 → 128 (relu) → 64 (relu) → 10 (softmax)
   """
 
-  @input_dim 784
+  # Kept deliberately small: gradients are computed numerically (one forward
+  # pass per parameter per batch), so a full-size MNIST MLP would take hours.
+  # We synthesize 16x16 "images" instead of 28x28. See ROADMAP — autodiff
+  # will unlock real-scale training.
+  @input_dim 256
   @num_classes 10
-  @num_train 500
-  @num_test 100
+  @num_train 64
+  @num_test 16
 
   def run do
     IO.puts("=== MNIST-like Classifier with ExBurn ===\n")
@@ -42,14 +46,14 @@ defmodule MNISTSimple do
     # ── 2. Define model ─────────────────────────────────────────
     model =
       Axon.input("input", shape: {nil, @input_dim})
-      |> Axon.dense(128, activation: :relu, name: "hidden1")
+      |> Axon.dense(8, activation: :relu, name: "hidden1")
       |> Axon.dropout(rate: 0.2)
-      |> Axon.dense(64, activation: :relu, name: "hidden2")
+      |> Axon.dense(8, activation: :relu, name: "hidden2")
       |> Axon.dropout(rate: 0.2)
       |> Axon.dense(@num_classes, name: "output")
 
     IO.puts("Model architecture:")
-    IO.puts(Axon.Display.display(model, []))
+    IO.inspect(Axon.get_output_shape(model, Nx.template({1, 784}, :f32)), label: "Output shape")
 
     # ── 3. Compile ──────────────────────────────────────────────
     compiled = ExBurn.Model.compile(model,
@@ -65,19 +69,20 @@ defmodule MNISTSimple do
 
     trained =
       ExBurn.Training.fit(compiled, {train_x, train_y},
-        epochs: 20,
+        epochs: 2,
         batch_size: 32,
+        grad_method: :numerical_batch,
         verbose: false,
         callbacks: [
           fn
-            %{epoch: epoch, loss: loss} when rem(epoch, 5) == 0 ->
-              acc = compute_accuracy(trained, test_x, test_y)
-              IO.puts("  Epoch #{String.pad_leading("#{epoch}", 2)}: loss=#{Float.round(loss, 4)} test_acc=#{Float.round(acc * 100, 1)}%")
-              %{epoch: epoch, loss: loss}
+            %{epoch: epoch, loss: loss} = metrics ->
+              # NOTE: `trained` doesn't exist yet during training, so we only
+              # log the loss here; accuracy is evaluated after fit returns.
+              IO.puts(
+                "  Epoch #{String.pad_leading("#{epoch}", 2)}: loss=#{Float.round(loss, 4)}"
+              )
 
-            %{epoch: epoch, loss: loss} ->
-              IO.puts("  Epoch #{String.pad_leading("#{epoch}", 2)}: loss=#{Float.round(loss, 4)}")
-              %{epoch: epoch, loss: loss}
+              metrics
           end
         ]
       )
@@ -104,7 +109,15 @@ defmodule MNISTSimple do
     pred = forward_pass(reloaded, sample)
     pred_class = Nx.argmax(pred) |> Nx.to_number()
     actual_class = Nx.argmax(Nx.slice(test_y, [0, 0], [1, @num_classes])) |> Nx.to_number()
-    probs = Nx.softmax(pred) |> Nx.to_flat_list() |> Enum.map(&Float.round(&1, 3))
+    # Numerically stable softmax
+    probs =
+      pred
+      |> Nx.subtract(Nx.reduce_max(pred, axes: [-1], keep_axes: true))
+      |> Nx.exp()
+      |> then(fn e -> Nx.divide(e, Nx.sum(e, axes: [-1], keep_axes: true)) end)
+      |> Nx.squeeze()
+      |> Nx.to_flat_list()
+      |> Enum.map(&Float.round(&1, 3))
     IO.puts("  Predicted: #{pred_class} | Actual: #{actual_class}")
     IO.puts("  Probabilities: #{inspect(probs)}")
 
@@ -125,10 +138,11 @@ defmodule MNISTSimple do
     y = Nx.equal(Nx.iota({n, @num_classes}, axis: 1), Nx.new_axis(labels, -1))
     y = Nx.as_type(y, :f32)
 
-    # Add class-specific signal to features
-    signal = Nx.multiply(y, 0.5)
-    signal = Nx.slice(signal, [0, 0], [n, @input_dim])
-    x = Nx.add(x, signal)
+    # Add class-specific signal: each class gets its own random vector
+    {class_vectors, _key} = Nx.Random.normal(key, 0.0, 0.5, shape: {@num_classes, @input_dim})
+
+    class_ids = Nx.argmax(y, axis: -1)
+    x = Nx.add(x, Nx.take(class_vectors, class_ids))
 
     {x, y}
   end
@@ -137,13 +151,13 @@ defmodule MNISTSimple do
 
   defp forward_pass(%ExBurn.Model{params: params}, input) do
     # Layer 1: hidden1
-    h = relu(Nx.add(Nx.dot(input, params["hidden1"]["weight"]), params["hidden1"]["bias"]))
+    h = relu(Nx.add(Nx.dot(input, params["hidden1.kernel"]), params["hidden1.bias"]))
 
     # Layer 2: hidden2
-    h = relu(Nx.add(Nx.dot(h, params["hidden2"]["weight"]), params["hidden2"]["bias"]))
+    h = relu(Nx.add(Nx.dot(h, params["hidden2.kernel"]), params["hidden2.bias"]))
 
     # Output layer
-    Nx.add(Nx.dot(h, params["output"]["weight"]), params["output"]["bias"])
+    Nx.add(Nx.dot(h, params["output.kernel"]), params["output.bias"])
   end
 
   defp relu(tensor), do: Nx.max(tensor, 0.0)
@@ -161,11 +175,10 @@ defmodule MNISTSimple do
   # ── Helpers ────────────────────────────────────────────────────
 
   defp format_param_count(params) do
+    # Model.params is a flat map of "layer.param" => tensor
     count =
-      Enum.reduce(params, 0, fn {_name, layer_params}, acc ->
-        Enum.reduce(layer_params, acc, fn {_param_name, tensor}, sum ->
-          sum + Nx.size(tensor)
-        end)
+      Enum.reduce(params, 0, fn {_key, tensor}, sum ->
+        sum + Nx.size(tensor)
       end)
 
     if count > 1_000_000 do

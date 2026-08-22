@@ -48,7 +48,10 @@ defmodule ExBurn do
   """
   @spec default_device() :: :cpu | :gpu
   def default_device do
-    if ExBurn.NifHelper.gpu_available(), do: :gpu, else: :cpu
+    # Tensors run through the Burn NIF, so report what *it* supports.
+    # (ExCubecl availability alone doesn't mean Burn executes on a GPU.)
+    if Code.ensure_loaded?(ExBurn.Nif) and function_exported?(ExBurn.Nif, :gpu_available, 0) and
+         ExBurn.Nif.gpu_available(), do: :gpu, else: :cpu
   end
 
   @doc """
@@ -107,7 +110,7 @@ defmodule ExBurn do
     ──────────────────────────────
     Device: #{device}
     GPU: #{if gpu?, do: "available", else: "not available"}
-    Backends: #{Enum.join(Enum.map(backends, &Atom.to_string/1), ", ")}
+    Backends: #{Enum.map_join(backends, ", ", &Atom.to_string/1)}
     """
     |> String.trim()
   end
@@ -159,6 +162,8 @@ defmodule ExBurn do
   """
   @spec smoke_test() :: :ok | {:error, String.t()}
   def smoke_test do
+    previous_backend = Nx.default_backend()
+
     try do
       Nx.default_backend(ExBurn.Backend)
 
@@ -171,7 +176,8 @@ defmodule ExBurn do
     rescue
       e -> {:error, "Smoke test failed: #{Exception.message(e)}"}
     after
-      Nx.default_backend(Nx.BinaryBackend)
+      # Restore whatever backend the caller had — not a hardcoded default.
+      Nx.default_backend(previous_backend)
     end
   end
 end

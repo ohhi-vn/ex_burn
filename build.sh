@@ -1,34 +1,30 @@
 #!/bin/bash
-cd /Users/manhvu/ohhi/OSS_Lib/ex_burn
+# Builds the NIF with the best GPU backend for the current platform.
+#
+# Usage:
+#   ./build.sh              # auto-detect backend
+#   ./build.sh cuda|metal|vulkan|cpu   # force a backend
+set -euo pipefail
 
-# Auto-detect the best GPU backend for this platform
+cd "$(dirname "$0")"
+
 detect_backend() {
-    # Check for NVIDIA GPU (Linux/macOS)
+    # NVIDIA GPU (any OS where nvidia-smi exists and works)
     if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
         echo "cuda"
         return
     fi
 
-    # Check for macOS (Metal)
-    if [[ "$(uname)" == "Darwin" ]]; then
-        echo "metal"
-        return
-    fi
-
-    # Check for Linux (Vulkan)
-    if [[ "$(uname)" == "Linux" ]]; then
-        echo "vulkan"
-        return
-    fi
-
-    # Fallback: CPU only
-    echo "cpu"
+    case "$(uname)" in
+        Darwin) echo "metal" ;;
+        Linux) echo "vulkan" ;;
+        *) echo "cpu" ;;
+    esac
 }
 
-BACKEND=$(detect_backend)
-echo "Detected GPU backend: $BACKEND"
+BACKEND="${1:-$(detect_backend)}"
 
-case $BACKEND in
+case "$BACKEND" in
     cuda)
         echo "Building with CUDA support..."
         export RUSTLER_NIF_CARGO_FEATURES="cuda"
@@ -43,8 +39,12 @@ case $BACKEND in
         ;;
     cpu)
         echo "Building CPU-only (NdArray)..."
-        export RUSTLER_NIF_CARGO_FEATURES="cpu"
+        unset RUSTLER_NIF_CARGO_FEATURES
+        ;;
+    *)
+        echo "Unknown backend: $BACKEND (expected cuda, metal, vulkan, or cpu)" >&2
+        exit 1
         ;;
 esac
 
-mix compile 2>&1 | head -100
+mix compile

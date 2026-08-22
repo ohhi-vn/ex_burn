@@ -79,7 +79,7 @@ defmodule ExBurn.BurnBridgeTest do
       target = ExBurn.BurnBridge.from_nx(Nx.tensor([4.0, 5.0, 6.0]))
       loss = ExBurn.BurnBridge.mse(pred, target)
       {:ok, nx_loss} = ExBurn.Tensor.to_nx(loss)
-      val = Nx.to_number(nx_loss)
+      [val] = Nx.to_flat_list(nx_loss)
       assert val > 0.0
     end
   end
